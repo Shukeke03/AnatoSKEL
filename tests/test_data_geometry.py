@@ -69,6 +69,26 @@ def test_unknown_labels_and_missing_physical_units_fail(tmp_path):
         load_scan(dict(record, mask=str(tmp_path / "mask.nii.gz")))
 
 
+def test_missing_mask_units_inherit_only_identical_explicit_ct_grid(tmp_path):
+    affine = np.diag([0.002, 0.003, 0.004, 1.0])
+    ct_path, mask_path = tmp_path / "ct.nii.gz", tmp_path / "mask.nii.gz"
+    save_nifti(ct_path, np.zeros((4, 4, 4), np.float32), affine, "meter")
+    labels = np.zeros((4, 4, 4), np.uint8)
+    labels[1, 1, 1] = 20
+    save_nifti(mask_path, labels, affine, "unknown")
+    record = {"patient_id": "p", "scan_id": "s", "split": "train",
+              "ct": str(ct_path), "mask": str(mask_path)}
+    scan = load_scan(record)
+    np.testing.assert_allclose(scan["affine"], np.diag([2.0, 3.0, 4.0, 1.0]), atol=1e-6)
+    assert scan["labels"][1, 1, 1] == 20
+    assert nib.load(mask_path).header.get_xyzt_units()[0] == "unknown"
+    shifted = affine.copy()
+    shifted[0, 3] = 0.001
+    save_nifti(mask_path, labels, shifted, "unknown")
+    with pytest.raises(ValueError, match="identical explicit CT grid"):
+        load_scan(record)
+
+
 def test_resample_and_exact_physical_crop_preserve_frames(tmp_path):
     manifest = generate_synthetic_dataset(tmp_path, 32)
     scan = ScanDataset(manifest, "train")[0]

@@ -122,17 +122,28 @@ def _spacing(value: float | Sequence[float]) -> np.ndarray:
     return result
 
 
-def _load_nifti(path: Path):
+def nifti_affine_mm(image, *, reference=None):
+    """Read physical geometry; missing mask units require an identical explicit CT grid."""
+    units = image.header.get_xyzt_units()[0]
+    factors = {"mm": 1.0, "meter": 1000.0, "micron": 0.001}
+    if units == "unknown" and reference is not None:
+        reference_units = reference.header.get_xyzt_units()[0]
+        if (reference_units not in factors or image.shape != reference.shape
+                or not np.allclose(image.affine, reference.affine, atol=1e-5, rtol=0)):
+            raise ValueError("Spatial units missing: inheritance requires an identical explicit CT grid")
+        units = reference_units
+    if units not in factors:
+        raise ValueError(f"Spatial units must be explicit mm/meter/micron; got {units}")
+    affine = np.asarray(image.affine, dtype=np.float64).copy()
+    affine[:3] *= factors[units]
+    return validate_affine(affine)
+
+
+def _load_nifti(path: Path, *, reference=None):
     image = nib.load(str(path))
     if len(image.shape) != 3:
         raise ValueError(f"Expected a 3D NIfTI at {path}, got {image.shape}")
-    units = image.header.get_xyzt_units()[0]
-    factors = {"mm": 1.0, "meter": 1000.0, "micron": 0.001}
-    if units not in factors:
-        raise ValueError(f"Spatial units must be explicit mm/meter/micron at {path}; got {units}")
-    affine = np.asarray(image.affine, dtype=np.float64).copy()
-    affine[:3] *= factors[units]
-    return image, validate_affine(affine)
+    return image, nifti_affine_mm(image, reference=reference)
 
 
 def _truncated(mask_xyz: np.ndarray, valid_xyz: np.ndarray) -> bool:
@@ -153,7 +164,7 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         raise ValueError("CT contains nonfinite intensities")
     labels = None
     if record.mask is not None:
-        label_image, label_affine = _load_nifti(record.mask)
+        label_image, label_affine = _load_nifti(record.mask, reference=image)
         if label_image.shape != image.shape or not np.allclose(label_affine, affine, atol=1e-5):
             raise ValueError("CT and mask must share voxel shape and physical affine")
         raw = np.asarray(label_image.dataobj)

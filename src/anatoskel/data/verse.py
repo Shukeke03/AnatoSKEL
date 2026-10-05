@@ -18,7 +18,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 
-from .scans import VERSE_IDS, validate_affine
+from .scans import VERSE_IDS, nifti_affine_mm, validate_affine
 
 
 OFFICIAL_SOURCES = {
@@ -120,17 +120,14 @@ def _validate_centroids(path):
             raise VerseImportError(f"Nonfinite centroid coordinates: {path}")
 
 
-def _open_image(path):
+def _open_image(path, *, reference=None):
     image = nib.load(str(path), keep_file_open=True)
     if len(image.shape) != 3:
         raise VerseImportError(f"Expected a 3D NIfTI: {path}")
-    units = image.header.get_xyzt_units()[0]
-    factors = {"mm": 1.0, "meter": 1000.0, "micron": 0.001}
-    if units not in factors:
-        raise VerseImportError(f"Explicit physical NIfTI units required: {path} (got {units})")
-    affine = np.asarray(image.affine, dtype=np.float64).copy()
-    affine[:3] *= factors[units]
-    return image, validate_affine(affine)
+    try:
+        return image, nifti_affine_mm(image, reference=reference)
+    except ValueError as exc:
+        raise VerseImportError(f"Invalid physical NIfTI geometry: {path}: {exc}") from exc
 
 
 def _chunks(image, chunk_slices=4):
@@ -143,13 +140,13 @@ def _chunks(image, chunk_slices=4):
         yield start, stop, np.asanyarray(image.dataobj[:, :, start:stop])
 
 
-def fingerprint_nifti(path, *, labels=False, chunk_slices=4) -> dict[str, Any]:
+def fingerprint_nifti(path, *, labels=False, chunk_slices=4, reference=None) -> dict[str, Any]:
     """Content SHA256 of scaled voxels plus voxel geometry, independent of gzip/header trivia.
 
     CT values canonicalize to little-endian float32; integer labels to uint16.
     This detects exact voxel/geometry duplicates, not resampled near-duplicates.
     """
-    image, affine = _open_image(path)
+    image, affine = _open_image(path, reference=reference)
     geometry = {"shape_xyz": list(image.shape), "affine_ras_mm": np.round(affine, 6).tolist()}
     digest = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode())
     seen_labels, foreground_count = set(), 0
@@ -177,7 +174,10 @@ def fingerprint_nifti(path, *, labels=False, chunk_slices=4) -> dict[str, Any]:
         digest.update(payload.tobytes(order="F"))
     result = {"sha256": digest.hexdigest(), "shape_xyz": list(image.shape),
               "affine_ras_mm": affine.tolist(), "dtype_policy": "uint16" if labels else "float32",
-              "fingerprint_scope": "scaled_xyz_voxels_and_mm_affine_rounded_1e-6"}
+              "fingerprint_scope": "scaled_xyz_voxels_and_mm_affine_rounded_1e-6",
+              "source_spatial_units": image.header.get_xyzt_units()[0],
+              "spatial_units_policy": "inherited_from_identical_ct_grid" if
+              image.header.get_xyzt_units()[0] == "unknown" else "explicit_header"}
     if labels:
         if not foreground_count:
             raise VerseImportError(f"No annotated foreground in mask: {path}")
@@ -280,7 +280,8 @@ def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path 
             if progress:
                 progress(f"[{number}/{len(records)}] stream-check {record['scan_id']} ({record['split']})")
             ct_info = fingerprint_nifti(record["ct"])
-            mask_info = fingerprint_nifti(record["mask"], labels=True)
+            ct_image, _ = _open_image(record["ct"])
+            mask_info = fingerprint_nifti(record["mask"], labels=True, reference=ct_image)
             if ct_info["shape_xyz"] != mask_info["shape_xyz"] or not np.allclose(
                 ct_info["affine_ras_mm"], mask_info["affine_ras_mm"], atol=1e-5, rtol=0):
                 raise VerseImportError(f"CT/mask physical grids differ: {record['scan_id']}")
@@ -334,6 +335,8 @@ def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path 
             row = {key: record[key] for key in ("patient_id", "scan_id", "split", "source_package", "source_year")}
             row.update(ct=relative(record["ct"]), mask=relative(record["mask"]),
                        ct_sha256=record["ct_info"]["sha256"], mask_sha256=record["mask_info"]["sha256"],
+                       mask_source_spatial_units=record["mask_info"]["source_spatial_units"],
+                       mask_spatial_units_policy=record["mask_info"]["spatial_units_policy"],
                        original_patient_id=record["original_patient_id"],
                        original_scan_entity=record["original_scan_entity"],
                        centroid_annotations=[relative(path) for path in record["annotations"]])

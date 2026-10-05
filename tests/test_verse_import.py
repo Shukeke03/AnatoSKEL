@@ -79,6 +79,31 @@ def test_gl_subjects_preserve_namespace_and_official_split(tmp_path):
         "sub-verse003", "sub-gl003", "sub-gl004"}
 
 
+def test_missing_mask_units_import_and_load_with_paired_ct(tmp_path):
+    raw = tmp_path / "raw"
+    ct, mask = case(raw, "dataset-verse19training", "sub-verse004")
+    explicit_info = fingerprint_nifti(mask, labels=True)
+    image = nib.load(mask)
+    image.header.set_xyzt_units("unknown")
+    # Save to a different path before replacing the source read by ArrayProxy.
+    replacement = mask.with_name("replacement.nii.gz")
+    nib.save(image, replacement)
+    replacement.replace(mask)
+    inherited_info = fingerprint_nifti(mask, labels=True, reference=nib.load(ct))
+    assert inherited_info["sha256"] == explicit_info["sha256"]
+    assert inherited_info["spatial_units_policy"] == "inherited_from_identical_ct_grid"
+    with pytest.raises(VerseImportError, match="Spatial units"):
+        fingerprint_nifti(mask, labels=True)
+    manifest = tmp_path / "manifest.jsonl"
+    prepare_verse(raw, manifest)
+    row = json.loads(manifest.read_text())
+    assert row["mask_source_spatial_units"] == "unknown"
+    assert row["mask_spatial_units_policy"] == "inherited_from_identical_ct_grid"
+    scan = load_scan(read_manifest(manifest)[0])
+    assert (scan["labels"] == 20).sum().item() == 216
+    assert nib.load(mask).header.get_xyzt_units()[0] == "unknown"
+
+
 def test_fingerprint_streams_without_full_proxy_array_and_normalizes_dtype(tmp_path, monkeypatch):
     ct, _ = case(tmp_path, "dataset-verse19training", "sub-verse004")
     image = nib.load(ct)
