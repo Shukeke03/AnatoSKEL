@@ -41,10 +41,12 @@ def mask_centers_mm(mask_logits: Tensor, affine: Tensor) -> Tensor:
     dimensions = weights.shape[-3:]
     coordinates = []
     for axis, size in enumerate(dimensions):
-        shape = [1] * 5
-        shape[axis + 2] = size
-        axis_grid = torch.arange(size, device=weights.device, dtype=weights.dtype).reshape(shape)
-        coordinates.append((weights * axis_grid).sum(dim=(-3, -2, -1)) / mass)
+        # Reduce to a 1D marginal before multiplying coordinates: a whole-scan
+        # Q*D*H*W float32 temporary can otherwise cost another 500+ MiB per axis.
+        other_axes = tuple(dimension for dimension in (2, 3, 4) if dimension != axis + 2)
+        marginal = weights.sum(dim=other_axes)
+        axis_grid = torch.arange(size, device=weights.device, dtype=weights.dtype)
+        coordinates.append((marginal * axis_grid).sum(-1) / mass)
     xyz = torch.stack(tuple(reversed(coordinates)), dim=-1)
     return xyz @ affine[:, :3, :3].transpose(-1, -2) + affine[:, None, :3, 3]
 

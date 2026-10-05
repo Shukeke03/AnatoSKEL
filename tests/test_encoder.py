@@ -50,6 +50,25 @@ def test_mask_centroid_half_precision_uses_safe_accumulation():
     assert torch.isfinite(centers).all()
 
 
+def test_centroid_marginal_reduction_matches_dense_values_and_gradients():
+    logits = torch.randn(2, 3, 5, 6, 7, requires_grad=True)
+    reference_logits = logits.detach().clone().requires_grad_()
+    affine = torch.eye(4).repeat(2, 1, 1)
+    affine[1, :3, :3] = torch.diag(torch.tensor([-2.0, 3.0, 4.0]))
+    affine[1, :3, 3] = torch.tensor([13.0, -8.0, 22.0])
+    prediction = mask_centers_mm(logits, affine)
+    z, y, x = torch.meshgrid(torch.arange(5), torch.arange(6), torch.arange(7), indexing="ij")
+    xyz = torch.stack((x, y, z), -1).float()
+    probability = reference_logits.sigmoid()
+    moment = (probability[..., None] * xyz).sum(dim=(2, 3, 4))
+    mean = moment / probability.sum(dim=(2, 3, 4))[..., None]
+    reference = mean @ affine[:, :3, :3].transpose(-1, -2) + affine[:, None, :3, 3]
+    assert torch.allclose(prediction, reference, atol=2e-6)
+    prediction.square().sum().backward()
+    reference.square().sum().backward()
+    assert torch.allclose(logits.grad, reference_logits.grad, atol=2e-6)
+
+
 def test_detection_equivariant_to_arbitrary_nifti_origin():
     torch.set_num_threads(2)
     detector = CoarseDetector(ModelConfig.smoke()).eval()

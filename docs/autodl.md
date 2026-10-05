@@ -1,6 +1,6 @@
 # AutoDL 兼容性约定
 
-本次只准备本地代码与配置，没有在服务器创建环境或下载数据。
+本地与 AutoDL 使用以下统一版本；服务器使用独立 Python 3.11 环境，不修改镜像自带的 Python 3.12。
 
 | 项目 | 固定版本 / 约定 |
 |---|---|
@@ -22,7 +22,7 @@
 [官方 cu128 wheel 索引](https://download.pytorch.org/whl/cu128/torch/)
 中 Python3.11/Linux 的2.8.0包为 `manylinux_2_28_x86_64`。
 
-后续服务器命令（目前尚未执行）：
+服务器环境安装与检查命令：
 
 ```bash
 conda env create -f environment-gpu.yml
@@ -35,7 +35,9 @@ anatoskel doctor --require-cuda
 pytest -q
 ```
 
-保留官方 cu128 index；不要换成未核实的默认镜像包或把本地 macOS 的 freeze 文件用于 Linux。
+优先使用官方 cu128 index。如果通过国内 PyPI 镜像安装 `torch==2.8.0`，
+必须检查实际 `torch.__version__ == "2.8.0+cu128"` 且 `torch.version.cuda == "12.8"`，
+检查不通过就停止部署。不要把本地 macOS 的 freeze 文件用于 Linux。
 PyTorch wheel 带运行库，`nvcc --version`、`nvidia-smi` 显示的 CUDA 能力、
 `torch.version.cuda` 是三个不同信息。没有 CUDA 扩展时不需要另装系统 Toolkit。
 
