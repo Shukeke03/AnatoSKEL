@@ -30,6 +30,12 @@ python -u scripts/run_autodl.py --publish-demo > outputs/first5090/logs/run.log 
 所有步骤及Git上传成功后写`JOB_COMPLETE`，不会自动关机。
 重跑入口可复用缓存、已完成的先验与主模型checkpoint。
 
+cache、atlas、prior_samples为CPU数据准备阶段，GPU利用率可以为0%。
+prior_samples会先为全部141个训练扫描生成骨块、距离场监督与配准坐标；
+之后进入prior_train的GPU先验优化，再启动主模型train。
+监控脚本会显示先验样本准备进度。主训练启动需确认step持续增加、loss有限，
+以及有有效腰椎骨块的步骤中fine_bones大于0。
+
 监控：
 
 ```bash
