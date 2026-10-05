@@ -26,6 +26,8 @@ def main():
     atlas.add_argument("--manifest", required=True)
     atlas.add_argument("--output", required=True)
     atlas.add_argument("--max-points", type=int, default=2048)
+    atlas.add_argument("--cache-dir")
+    atlas.add_argument("--label-ids", nargs="+", type=int)
     prior = commands.add_parser("train-prior", help="Fit a provisional canonical shape-prior warm-start")
     training = commands.add_parser("train", help="Train coarse detector and local reconstruction")
     for command in (prior, training):
@@ -71,7 +73,8 @@ def main():
     elif command == "train-prior":
         result = train_prior(values.pop("config"), **values)
     elif command == "build-atlas":
-        result = {"atlas": str(build_atlas(values["manifest"], values["output"], values["max_points"])),
+        result = {"atlas": str(build_atlas(values["manifest"], values["output"], values["max_points"],
+                                          cache_dir=values["cache_dir"], label_ids=values["label_ids"])),
                   "anatomical_axes_validated": False}
     elif command == "train":
         values["prior_path"] = values.pop("prior")

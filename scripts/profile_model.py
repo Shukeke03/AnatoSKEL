@@ -143,7 +143,7 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true", help="Small local software architecture")
     parser.add_argument("--coarse-shape", nargs=3, type=int, default=(128, 128, 192), metavar=("D", "H", "W"))
     parser.add_argument("--local-size", type=int, default=128)
-    parser.add_argument("--bones", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--bones", type=int, choices=range(1, 9), default=1)
     parser.add_argument("--points", type=int, default=8192)
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--output")

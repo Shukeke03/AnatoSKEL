@@ -1,0 +1,32 @@
+model: {}
+data:
+  coarse_spacing_mm: 3.0
+  coarse_max_dim: 192
+  coarse_max_voxels: 4000000
+  local_spacing_mm: 1.0
+  local_size: 128
+train:
+  seed: 42
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  points_per_bone: 8192
+  max_bones_per_step: 6
+  fine_label_ids: [20, 21, 22, 23, 24, 25]
+  prior_batch_size: 32
+  cache_dir: data/verse/training-cache-v1
+  scan_workers: 2
+  roi_workers: 6
+  clip_grad: 1.0
+  amp: true
+  freeze_prior: true
+  roi_warmup_steps: 1000
+  roi_transition_steps: 4000
+  roi_jitter_mm: 8.0
+  checkpoint_every_steps: 100
+  log_every_steps: 10
+  weak_pose_weight: 0.05
+inference:
+  score_threshold: 0.5
+  field_chunk_points: 32768
+  label_ids: [20, 21, 22, 23, 24, 25]

@@ -208,15 +208,16 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         raw = np.asarray(label_image.dataobj)
         if not np.isfinite(raw).all() or not np.allclose(raw, np.rint(raw), atol=1e-6):
             raise ValueError("Mask must contain finite integer labels")
-        labels = np.rint(raw).astype(np.int64)
-        unknown = set(np.unique(labels)) - {0, *VERSE_IDS}
+        rounded = np.rint(raw)
+        unknown = set(np.unique(rounded)) - {0, *VERSE_IDS}
         if unknown:
             raise ValueError(f"Unsupported mask labels: {sorted(unknown)}")
+        labels = rounded.astype(np.uint8)
         if not np.allclose(label_affine, affine, atol=1e-5, rtol=0):
             # Label coordinates are preserved and resampled; no grid snapping.
             physical_mask = nib.Nifti1Image(raw, label_affine)
             labels = np.asarray(resample_from_to(physical_mask, (image.shape, affine), order=0,
-                                                mode="constant", cval=0).dataobj, dtype=np.int64)
+                                                mode="constant", cval=0).dataobj, dtype=np.uint8)
     def load_coverage(path, kind):
         valid_image, valid_affine = _load_nifti(path)
         if valid_image.shape != image.shape or not np.allclose(valid_affine, affine, atol=1e-5):
@@ -234,10 +235,11 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Scan has no observed voxels")
     if labels is not None and np.any((labels != 0) & ~valid):
         raise ValueError("Foreground labels may not lie outside valid_mask")
-    truncation = {} if labels is None else {
-        str(label): _truncated(labels == label, valid)
-        for label in np.unique(labels) if label != 0
-    }
+    truncation = {}
+    if labels is not None:
+        interior = ndimage.binary_erosion(valid, border_value=0)
+        boundary_labels = set(np.unique(labels[~interior]))
+        truncation = {str(label): label in boundary_labels for label in np.unique(labels) if label}
     ct = 2 * (np.clip(ct, -1000, 2000) + 1000) / 3000 - 1
     metadata = {"patient_id": record.patient_id, "scan_id": record.scan_id,
                 "split": record.split, "ct_path": str(record.ct), "units": "mm",
@@ -253,8 +255,16 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
 
 
 class ScanDataset(Dataset):
-    def __init__(self, manifest: str | Path | Sequence[ManifestRecord], split: str | None = None):
+    def __init__(self, manifest: str | Path | Sequence[ManifestRecord], split: str | None = None,
+                 cache_dir: str | Path | None = None):
         self.records = read_manifest(manifest) if isinstance(manifest, (str, Path)) else list(manifest)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_hash = None
+        if self.cache_dir:
+            import hashlib
+            if not isinstance(manifest, (str, Path)):
+                raise ValueError("Cached scans require the source manifest path")
+            self.cache_hash = hashlib.sha256(Path(manifest).read_bytes()).hexdigest()
         if split is not None and split not in ("train", "val", "test"):
             raise ValueError("Unknown split")
         if split is not None:
@@ -264,7 +274,37 @@ class ScanDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, index):
+        if self.cache_dir:
+            payload = torch.load(self.cache_dir / f"{self.records[index].scan_id}.pt", weights_only=True)
+            if payload["manifest_sha256"] != self.cache_hash:
+                raise ValueError("Training cache belongs to a different manifest")
+            scan = payload["scan"]
+            scan["volume"] = scan["volume"].float()
+            scan["cached_coarse"] = payload["coarse"]
+            return scan
         return load_scan(self.records[index])
+
+
+def bone_voxels_world(scan, label_id):
+    """Use tight label bounds to avoid scanning a full CT for each bone geometry call."""
+    if "label_bounds" not in scan["metadata"]:
+        boxes = ndimage.find_objects(_numpy(scan["labels"]), max_label=28)
+        scan["metadata"]["label_bounds"] = {
+            str(i + 1): [[s.start, s.stop] for s in box]
+            for i, box in enumerate(boxes) if box is not None}
+    bounds = scan["metadata"]["label_bounds"].get(str(label_id))
+    if bounds is None:
+        raise ValueError(f"Label {label_id} is absent")
+    # One voxel margin preserves boundary erosion equivalence to the full mask.
+    starts = np.array([max(0, b[0] - 1) for b in bounds])
+    stops = [min(scan["labels"].shape[i], b[1] + 1) for i, b in enumerate(bounds)]
+    slices = tuple(slice(int(a), int(b)) for a, b in zip(starts, stops))
+    mask = scan["labels"][slices] == label_id
+    affine = scan["affine"].clone()
+    affine[:3, 3] += affine[:3, :3] @ torch.from_numpy(starts[::-1].copy()).to(affine)
+    xyz = mask.nonzero().numpy()[:, ::-1]
+    world = xyz @ affine[:3, :3].numpy().T + affine[:3, 3].numpy()
+    return mask, affine, world
 
 
 def coarse_resample(scan: dict, spacing_mm: float | Sequence[float], order: int = 1) -> dict:
@@ -360,11 +400,7 @@ def crop_bone(scan: dict, label_id: int, size: int | Sequence[int] = 128,
         raise ValueError("crop_bone needs a mask; inference must use predicted ROIs")
     if margin_mm < 0:
         raise ValueError("Crop margin must be nonnegative")
-    locations = torch.nonzero(scan["labels"] == label_id).cpu().numpy()
-    if not len(locations):
-        raise ValueError(f"Label {label_id} is absent")
-    old_affine = validate_affine(scan["affine"])
-    world = locations[:, ::-1] @ old_affine[:3, :3].T + old_affine[:3, 3]
+    _, _, world = bone_voxels_world(scan, label_id)
     cropped = crop_at_center(scan, world.mean(axis=0), size=size, spacing_mm=spacing_mm)
     affine = validate_affine(cropped["affine"])
     inverse = np.linalg.inv(affine)

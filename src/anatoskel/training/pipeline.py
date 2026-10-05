@@ -1,9 +1,11 @@
 """Training-split prior fitting and memory-conscious coarse/fine optimization."""
 from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import hashlib
 import json
 import random
+import time
 
 import numpy as np
 import torch
@@ -12,6 +14,7 @@ import torch.nn.functional as F
 from anatoskel.config import ModelConfig, load_config
 from anatoskel.data import (ScanDataset, canonical_from_mask, coarse_resample, crop_at_center,
                            crop_bone, label_to_class, read_manifest, sample_supervision)
+from anatoskel.data.scans import bone_voxels_world
 from anatoskel.models import AnatoSKEL
 from anatoskel.geometry import fit_atlas, load_atlas, surface_points
 from anatoskel.models.backend import AnatomicalShapePrior, world_to_canonical
@@ -77,6 +80,15 @@ def _amp(device, enabled):
         else nullcontext()
 
 
+def training_dataset(settings, manifest):
+    cache_dir = settings.get("train", {}).get("cache_dir")
+    if cache_dir:
+        summary = json.loads((Path(cache_dir) / "cache.json").read_text())
+        if summary["data_config"] != settings["data"] or summary["status"] != "complete":
+            raise ValueError("Training cache is incomplete or has different physical data settings")
+    return ScanDataset(manifest, split="train", cache_dir=cache_dir)
+
+
 def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_steps=None,
                 atlas_path=None):
     """Auto-decoder warm-start. PCA frames remain explicitly provisional.
@@ -90,30 +102,35 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
     config = ModelConfig.from_dict(settings.get("model", {}))
     device = choose_device(device)
     seed_everything(settings.get("train", {}).get("seed", 42))
-    dataset = ScanDataset(manifest, split="train")
+    train_cfg = settings.get("train", {})
+    dataset = training_dataset(settings, manifest)
     atlas = load_atlas(atlas_path, provenance(manifest)["training_patients"]) if atlas_path else None
     prior = AnatomicalShapePrior(config).to(device)
     samples, frames = [], []
-    for scan in dataset:
+    allowed = set(train_cfg.get("fine_label_ids", range(1, 29)))
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    for scan_index, scan in enumerate(dataset):
         if scan["labels"] is None:
             raise ValueError("Prior fitting requires training masks")
         for label in torch.unique(scan["labels"]):
             label = int(label)
-            if label == 0:
+            if label == 0 or label not in allowed:
                 continue
             if scan["metadata"]["original_truncated"].get(str(label), False):
                 continue
             roi = crop_bone(scan, label, size=settings["data"]["local_size"],
                             spacing_mm=settings["data"]["local_spacing_mm"])
             try:
-                frame = canonical_from_mask(scan["labels"] == label, scan["affine"])
+                bone_mask, bone_affine, _ = bone_voxels_world(scan, label)
+                frame = canonical_from_mask(bone_mask, bone_affine)
             except ValueError:
                 continue
             if atlas is not None:
                 if str(label) not in atlas["classes"]:
                     continue
                 fitted = fit_atlas(atlas["classes"][str(label)]["points"],
-                    surface_points(scan["labels"] == label, scan["affine"]))
+                    surface_points(bone_mask, bone_affine))
                 frame.update(rotation=torch.from_numpy(fitted["rotation"]),
                              translation=torch.from_numpy(fitted["translation"]),
                              pose_valid=fitted["pose_valid"], method="trimmed_rigid_icp",
@@ -134,26 +151,39 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
                            "fit_ambiguous": frame.get("fit_ambiguous", True),
                            "rotation": rotation.flatten().tolist(),
                            "translation": translation.flatten().tolist()})
+        print(json.dumps({"stage":"prior_samples", "scan":scan_index+1,
+                          "scans":len(dataset), "bones":len(samples)}), flush=True)
     if not samples:
         raise ValueError("No full, stable training bones available for shape-prior fitting")
     codes = torch.nn.Parameter(torch.zeros(len(samples), config.beta_dim, device=device))
     optimizer = torch.optim.Adam([*prior.parameters(), codes], lr=0.001)
-    logs, step = [], 0
-    for _ in range(epochs):
-        for index in torch.randperm(len(samples)).tolist():
-            points, target, class_id = samples[index]
+    batch_size = int(train_cfg.get("prior_batch_size", 1))
+    if batch_size < 1:
+        raise ValueError("prior_batch_size must be positive")
+    point_bank = torch.stack([s[0] for s in samples]).to(device)
+    target_bank = torch.stack([s[1] for s in samples]).to(device)
+    class_bank = torch.tensor([s[2] for s in samples], device=device)
+    logs, step, samples_seen = [], 0, 0
+    for epoch in range(epochs):
+        for indices in torch.randperm(len(samples)).split(batch_size):
+            indices = indices.to(device)
             optimizer.zero_grad(set_to_none=True)
-            predicted = prior(points[None, None].to(device), codes[index][None, None],
-                              torch.tensor([[class_id]], device=device))
-            loss = F.smooth_l1_loss(predicted[0, 0], target.to(device), beta=0.1) \
-                + 1e-4 * codes[index].square().mean()
+            with _amp(device, train_cfg.get("amp", True)):
+                predicted = prior(point_bank[indices][None], codes[indices][None],
+                                  class_bank[indices][None])
+                loss = F.smooth_l1_loss(predicted[0].float(), target_bank[indices], beta=0.1) \
+                    + 1e-4 * codes[indices].square().mean()
             loss.backward()
             if not torch.isfinite(loss):
                 raise RuntimeError("Nonfinite prior training loss")
             torch.nn.utils.clip_grad_norm_([*prior.parameters(), codes], 1, error_if_nonfinite=True)
             optimizer.step()
             step += 1
+            samples_seen += len(indices)
             logs.append({"step": step, "prior_loss": float(loss.detach())})
+            if step % 20 == 0:
+                print(json.dumps({"stage":"prior_train", "epoch":epoch+1,
+                                  "step":step, "loss":float(loss.detach())}), flush=True)
             if max_steps and step >= max_steps:
                 break
         if max_steps and step >= max_steps:
@@ -162,6 +192,7 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
     save_checkpoint(path, prior, config, optimizer=optimizer, step=step, kind="prior",
                     provenance=provenance(manifest),
                     extra={"shape_codes": codes.detach().cpu(), "canonical_frames": frames,
+                           "prior_samples_seen":samples_seen, "prior_batch_size":batch_size,
                            "canonical_status": "training_atlas_weak_registration" if atlas else "provisional_pca",
                            "pose_supervision_valid": any(f["pose_valid"] for f in frames),
                            "atlas_sha256": hashlib.sha256(Path(atlas_path).read_bytes()).hexdigest() if atlas else None})
@@ -181,7 +212,7 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
     device = choose_device(device)
     model = AnatoSKEL(config).to(device)
     origin = provenance(manifest)
-    dataset = ScanDataset(manifest, split="train")
+    dataset = training_dataset(settings, manifest)
     if not len(dataset):
         raise ValueError("Training split is empty")
     prior_trained, canonical_frames, code_targets = False, [], None
@@ -234,6 +265,13 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
             return {"checkpoint": str(resume), "steps": step, "last": None,
                     "reason": "requested_step_limit_already_reached"}
     model.train()
+    roi_workers = int(train_cfg.get("roi_workers", 1))
+    roi_pool = ThreadPoolExecutor(max_workers=roi_workers) if roi_workers > 1 else None
+    loader = torch.utils.data.DataLoader(dataset, batch_size=None,
+        num_workers=int(train_cfg.get("scan_workers", 0)), shuffle=False,
+        generator=torch.Generator().manual_seed(train_cfg.get("seed", 42)),
+        prefetch_factor=1 if train_cfg.get("scan_workers", 0) else None,
+        persistent_workers=bool(train_cfg.get("scan_workers", 0)))
     logs = resume_payload.get("training_log", []) if resume_payload else []
     path = Path(output) / "model.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,11 +289,16 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
                    "training_status": "synthetic_check" if origin["synthetic"] else "trained"})
 
     for epoch in range(start_epoch, train_cfg["epochs"]):
-        for scan_index in range(start_scan if epoch == start_epoch else 0, len(dataset)):
-            scan = dataset[scan_index]
+        epoch_start = start_scan if epoch == start_epoch else 0
+        for scan_index, scan in enumerate(loader):
+            if scan_index < epoch_start:
+                continue
+            iteration_start = time.perf_counter()
             if scan["labels"] is None:
                 raise ValueError("Main training requires annotated scans")
-            coarse = coarse_scan(scan, data_cfg)
+            coarse = scan.get("cached_coarse")
+            if coarse is None:
+                coarse = coarse_scan(scan, data_cfg)
             optimizer.zero_grad(set_to_none=True)
             with _amp(device, train_cfg.get("amp", True)):
                 detection = model.encode_coarse(coarse["volume"][None].to(device),
@@ -274,24 +317,29 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
             predicted_centers = detection["centers_mm"].detach()
             coarse_loss.backward()
             del detection
-            selected = matches[:train_cfg.get("max_bones_per_step", 2)]
+            fine_matches = [m for m in matches if m[1] in
+                            train_cfg.get("fine_label_ids", range(1, 29))]
+            selected = fine_matches[:train_cfg.get("max_bones_per_step", 2)]
             # Rotate the selected subset so all visible identities get fine supervision.
-            if matches:
-                offset = step % len(matches)
-                selected = (matches[offset:] + matches[:offset])[:train_cfg.get("max_bones_per_step", 2)]
+            if fine_matches:
+                offset = step % len(fine_matches)
+                selected = (fine_matches[offset:] + fine_matches[:offset])[:train_cfg.get("max_bones_per_step", 2)]
             rois, supervision, chosen, anchors, class_ids, partial = [], [], [], [], [], []
             warmup, transition = train_cfg.get("roi_warmup_steps", 1000), \
                 max(1, train_cfg.get("roi_transition_steps", 4000))
             predicted_fraction = min(1., max(0., (step - warmup) / transition))
+            tasks = []
             for query, label in selected:
-                if not (scan["labels"] == label).any():
-                    continue
                 # Even a tiny/partial bone has an observed centroid; it need not
                 # satisfy the stronger prerequisites of a canonical pose fit.
-                xyz = (scan["labels"] == label).nonzero().float().mean(0).flip(0)
-                target_center = scan["affine"][:3, :3].float() @ xyz + scan["affine"][:3, 3].float()
+                _, _, world = bone_voxels_world(scan, label)
+                target_center = torch.from_numpy(world.mean(axis=0)).float()
                 center = predicted_centers[0, query].cpu() if random.random() < predicted_fraction \
                     else target_center + torch.randn(3) * train_cfg.get("roi_jitter_mm", 8)
+                tasks.append((query, label, center))
+
+            def prepare_roi(task):
+                query, label, center = task
                 roi = crop_at_center(scan, center, size=data_cfg["local_size"],
                                      spacing_mm=data_cfg["local_spacing_mm"])
                 try:
@@ -300,7 +348,14 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
                 except ValueError:
                     # A missed ROI is still counted in detector loss. Never silently
                     # replace it with a GT-centred crop in the predicted-ROI phase.
+                    return None
+                return query, label, center, roi, points
+
+            prepared = roi_pool.map(prepare_roi, tasks) if roi_pool else map(prepare_roi, tasks)
+            for result in prepared:
+                if result is None:
                     continue
+                query, label, center, roi, points = result
                 rois.append(roi)
                 supervision.append(points)
                 chosen.append(query)
@@ -343,6 +398,7 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
                                                         code_targets[code_index].to(device).float())
                 fine_loss.backward()
                 fine_value = float(fine_loss.detach())
+                del context, state, prediction, fine_loss, truth, observed, points, target, valid
             if not torch.isfinite(coarse_loss) or not np.isfinite(fine_value):
                 raise RuntimeError("Nonfinite training loss")
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.get("clip_grad", 1),
@@ -352,10 +408,13 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
             record = {"step": step, "epoch": epoch, "coarse_loss": float(coarse_loss.detach()),
                       "fine_loss": fine_value, "fine_bones": len(rois),
                       "missed_or_uncensored_rois": len(selected) - len(rois),
-                      "predicted_roi_fraction": predicted_fraction, **components}
+                      "predicted_roi_fraction": predicted_fraction,
+                      "compute_and_roi_seconds":time.perf_counter()-iteration_start, **components}
             if not np.isfinite(record["coarse_loss"] + fine_value):
                 raise RuntimeError("Nonfinite training loss")
             logs.append(record)
+            if step % train_cfg.get("log_every_steps", 10) == 0:
+                print(json.dumps(record), flush=True)
             next_epoch = epoch if scan_index + 1 < len(dataset) else epoch + 1
             next_scan = (scan_index + 1) % len(dataset)
             with (Path(output) / "train_log.jsonl").open("a") as stream:
@@ -367,5 +426,7 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
         if max_steps and step >= max_steps:
             break
     checkpoint_now()
+    if roi_pool:
+        roi_pool.shutdown()
     (Path(output) / "train_log.json").write_text(json.dumps(logs, indent=2))
     return {"checkpoint": str(path), "steps": step, "last": logs[-1] if logs else None}

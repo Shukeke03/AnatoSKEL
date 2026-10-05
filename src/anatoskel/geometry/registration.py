@@ -17,7 +17,7 @@ from scipy.spatial import cKDTree
 import torch
 
 from anatoskel.data.scans import (ScanDataset, canonical_from_mask, label_to_class,
-                                  read_manifest, validate_affine)
+                                  read_manifest, validate_affine, bone_voxels_world)
 from .meshes import kabsch, transform_points
 
 
@@ -173,7 +173,8 @@ def load_atlas(path: str | Path, training_patients) -> dict[str, Any]:
     return dict(payload, classes=normalized, anatomical_axes_validated=False)
 
 
-def build_atlas(manifest: str | Path, out_path: str | Path, max_points: int = 2048) -> Path:
+def build_atlas(manifest: str | Path, out_path: str | Path, max_points: int = 2048,
+                cache_dir=None, label_ids=None) -> Path:
     """Build per-class training exemplars; axes remain provisional PCA gauges.
 
     Only complete training bones with stable PCA initialization are eligible.
@@ -185,20 +186,21 @@ def build_atlas(manifest: str | Path, out_path: str | Path, max_points: int = 20
     if not training_patients:
         raise ValueError("Atlas construction requires training patients")
     candidates = {}
-    for scan in ScanDataset(records, split="train"):
+    for scan in ScanDataset(manifest, split="train", cache_dir=cache_dir):
         if scan["labels"] is None:
             raise ValueError("Atlas construction requires training masks")
         affine = validate_affine(scan["affine"])
         volume_per_voxel = abs(np.linalg.det(affine[:3, :3]))
         for label in torch.unique(scan["labels"]).tolist():
             label = int(label)
-            if label == 0 or scan["metadata"]["original_truncated"].get(str(label), False):
+            if (label == 0 or (label_ids is not None and label not in label_ids)
+                    or scan["metadata"]["original_truncated"].get(str(label), False)):
                 continue
-            mask = scan["labels"] == label
-            frame = canonical_from_mask(mask, affine)
+            mask, mask_affine, _ = bone_voxels_world(scan, label)
+            frame = canonical_from_mask(mask, mask_affine)
             if not frame["geometry_stable"]:
                 continue
-            world = surface_points(mask, affine, max_points)
+            world = surface_points(mask, mask_affine, max_points)
             rotation, translation = _numpy(frame["rotation"]), _numpy(frame["translation"])
             canonical = (world - translation) @ rotation
             candidates.setdefault(label, []).append({

@@ -205,7 +205,8 @@ def validate(args):
             if not origin.get("synthetic", False):
                 raise ValueError(message + "; do not freeze this partially visited prior")
             warnings.append(message)
-        if payload["kind"] == "prior" and payload["step"] < len(frames) and not origin.get("synthetic", False):
+        visits = payload.get("prior_samples_seen", payload["step"])
+        if payload["kind"] == "prior" and visits < len(frames) and not origin.get("synthetic", False):
             raise ValueError("Prior has fewer optimizer steps than training bones; finish a full bone pass before freezing")
     if payload["kind"] == "model" and not payload.get("prior_trained", False):
         warnings.append("Main model marks its prior as uninitialized; bootstrap requires separate quality checks")
