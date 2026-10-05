@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from anatoskel.config import ModelConfig, load_config
 from anatoskel.data import (ScanDataset, canonical_from_mask, coarse_resample, crop_at_center,
                            crop_bone, label_to_class, read_manifest, sample_supervision)
-from anatoskel.data.scans import bone_voxels_world
+from anatoskel.data.scans import bone_voxels_world, ensure_label_bounds
 from anatoskel.models import AnatoSKEL
 from anatoskel.geometry import fit_atlas, load_atlas, surface_points
 from anatoskel.models.backend import AnatomicalShapePrior, world_to_canonical
@@ -113,7 +113,7 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
     for scan_index, scan in enumerate(dataset):
         if scan["labels"] is None:
             raise ValueError("Prior fitting requires training masks")
-        for label in torch.unique(scan["labels"]):
+        for label in sorted(map(int,ensure_label_bounds(scan))):
             label = int(label)
             if label == 0 or label not in allowed:
                 continue
@@ -192,11 +192,25 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
                 break
         if max_steps and step >= max_steps:
             break
+    sign_audit = {}
+    with torch.no_grad():
+        for indices in torch.arange(len(samples)).split(batch_size):
+            indices = indices.to(device)
+            predicted = prior(point_bank[indices][None], codes[indices][None], class_bank[indices][None])[0]
+            for row, index in enumerate(indices.tolist()):
+                label = str(frames[index]["label_id"])
+                entry = sign_audit.setdefault(label, {"bones":0,"bones_with_zero_crossing":0,
+                                                      "field_min":float("inf"),"field_max":-float("inf")})
+                low, high = float(predicted[row].min()), float(predicted[row].max())
+                entry["bones"] += 1
+                entry["bones_with_zero_crossing"] += int(low < 0 < high)
+                entry["field_min"], entry["field_max"] = min(entry["field_min"], low), max(entry["field_max"], high)
     path = Path(output) / "prior.pt"
     save_checkpoint(path, prior, config, optimizer=optimizer, step=step, kind="prior",
                     provenance=provenance(manifest),
                     extra={"shape_codes": codes.detach().cpu(), "canonical_frames": frames,
                            "prior_samples_seen":samples_seen, "prior_batch_size":batch_size,
+                           "real_training_sample_sign_audit":sign_audit,
                            "canonical_status": "training_atlas_weak_registration" if atlas else "provisional_pca",
                            "pose_supervision_valid": any(f["pose_valid"] for f in frames),
                            "atlas_sha256": hashlib.sha256(Path(atlas_path).read_bytes()).hexdigest() if atlas else None})
@@ -336,7 +350,12 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
             for query, label in selected:
                 # Even a tiny/partial bone has an observed centroid; it need not
                 # satisfy the stronger prerequisites of a canonical pose fit.
-                _, _, world = bone_voxels_world(scan, label)
+                try:
+                    _, _, world = bone_voxels_world(scan, label)
+                except ValueError:
+                    # A sub-voxel fragment can vanish on the cached 1 mm grid.
+                    # Keep its coarse detector supervision and count the fine miss.
+                    continue
                 target_center = torch.from_numpy(world.mean(axis=0)).float()
                 center = predicted_centers[0, query].cpu() if random.random() < predicted_fraction \
                     else target_center + torch.randn(3) * train_cfg.get("roi_jitter_mm", 8)
@@ -375,7 +394,8 @@ def train_model(config_path, manifest, output, *, device="auto", prior_path=None
                                                torch.stack(anchors)[None].to(device))
                 # grid_sample and physical coordinate arithmetic remain FP32.
                 points = torch.stack([s["points_world"] for s in supervision])[None].to(device)
-                prediction = model.field(context, state, points)
+                with _amp(device, train_cfg.get("amp", True)):
+                    prediction = model.field(context, state, points)
                 target = torch.stack([s["target"] for s in supervision])[None].to(device)
                 valid = torch.stack([s["valid"] for s in supervision])[None].to(device)
                 fine_loss = field_loss(prediction["field"], target, valid & prediction["valid"],

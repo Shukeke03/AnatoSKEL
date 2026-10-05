@@ -10,7 +10,7 @@ import torch
 
 from anatoskel.config import load_config
 from anatoskel.data import coarse_resample, load_scan, read_manifest
-from anatoskel.data.scans import bone_voxels_world
+from anatoskel.data.scans import ensure_label_bounds
 from anatoskel.training.pipeline import coarse_scan
 
 
@@ -32,10 +32,7 @@ def prepare_one(task):
     scan['labels'] = scan['labels'].to(torch.uint8)
     coarse['labels'] = coarse['labels'].to(torch.uint8)
     # Cache only a lookup of tight bounds; no mask/point cloud per full volume.
-    for label in torch.unique(scan['labels']).tolist():
-        if label:
-            bone_voxels_world(scan, label)
-            break
+    ensure_label_bounds(scan)
     payload = {'manifest_sha256':manifest_hash, 'data_config':data, 'scan':scan, 'coarse':coarse,
                'policy':'full_FOV_common_physical_spacing; fp16_CT_storage; uint8_labels'}
     temporary = path.with_suffix('.tmp')

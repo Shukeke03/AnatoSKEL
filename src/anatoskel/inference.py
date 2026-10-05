@@ -11,7 +11,7 @@ from anatoskel.models import AnatoSKEL
 from anatoskel.runtime import choose_device
 from anatoskel.training.checkpoint import load_checkpoint
 from anatoskel.training.losses import VERSE_IDS
-from anatoskel.training.pipeline import coarse_scan, pack_context
+from anatoskel.training.pipeline import _amp, coarse_scan, pack_context
 
 
 def load_model(checkpoint, device="auto"):
@@ -48,8 +48,9 @@ def grid_fields(model, context, state, rois, chunk_points=32768):
     fields, valid = [], []
     for voxel_chunk in xyz.split(chunk_points):
         world = torch.einsum("nij,pj->npi", affine[:, :3, :3], voxel_chunk) + affine[:, None, :3, 3]
-        output = model.field(context, state, world[None])
-        fields.append(output["field"][0].cpu())
+        with _amp(device, True):
+            output = model.field(context, state, world[None])
+        fields.append(output["field"][0].float().cpu())
         valid.append(output["valid"][0].cpu())
     return torch.cat(fields, 1).reshape(len(rois), *shape), \
         torch.cat(valid, 1).reshape(len(rois), *shape)
@@ -70,8 +71,9 @@ def predict_scan(model, scan, settings, device, *, score_threshold=None, label_i
                 metadata={**scan["metadata"], "original_truncated": {}})
     inference_cfg, data_cfg = settings.get("inference", {}), settings["data"]
     coarse = coarse_scan(scan, data_cfg)
-    detection = model.encode_coarse(coarse["volume"][None].to(device),
-                                     coarse["affine"][None].to(device).float())
+    with _amp(device, settings.get("train", {}).get("amp", True)):
+        detection = model.encode_coarse(coarse["volume"][None].to(device),
+                                         coarse["affine"][None].to(device).float())
     chosen = select_detections(detection,
         inference_cfg.get("score_threshold", 0.5) if score_threshold is None else score_threshold,
         inference_cfg.get("label_ids", [20, 21, 22, 23, 24, 25]) if label_ids is None else label_ids)
@@ -91,8 +93,9 @@ def predict_scan(model, scan, settings, device, *, score_threshold=None, label_i
     for attempt in range(3):
         rois = [crop_at_center(scan, center, size=size, spacing_mm=spacing * expansion)
                 for center in centers]
-        context = pack_context(model, rois, queries, device)
-        state = model.reconstruct(context, queries, class_ids, anchors)
+        with _amp(device, settings.get("train", {}).get("amp", True)):
+            context = pack_context(model, rois, queries, device)
+            state = model.reconstruct(context, queries, class_ids, anchors)
         fields, valid = grid_fields(model, context, state, rois,
                                     inference_cfg.get("field_chunk_points", 32768))
         clipped = [_boundary_negative(f, v) for f, v in zip(fields, valid)]
@@ -163,7 +166,7 @@ def evaluate_manifest(checkpoint, manifest, output, *, device="auto", split="val
         fields_by_label = {d["label_id"]: i for i, d in enumerate(prediction["detections"])}
         native_labels, native_valid = scan["labels"].numpy(), scan["valid_mask"].numpy()
         native_affine = scan["affine"].numpy()
-        for label in sorted(set(allowed) & {int(x) for x in torch.unique(scan["labels"]) if int(x)}):
+        for label in sorted(set(allowed) & set(map(int,scan["metadata"]["original_truncated"]))):
             truth = (native_labels == label) & native_valid
             predicted = np.zeros_like(truth)
             if label in fields_by_label:
@@ -182,6 +185,8 @@ def evaluate_manifest(checkpoint, manifest, output, *, device="auto", split="val
             records.append({"scan_id": scan["metadata"]["scan_id"], "label_id": label,
                             "dice": dice, "detected": label in fields_by_label,
                             "predicted_roi": True})
+        print(f"EVAL {split} {scan['metadata']['scan_id']} bones={len(prediction['detections'])}",
+              flush=True)
     result = {"split": split, "bones": records,
               "mean_dice": float(np.mean([r["dice"] for r in records])) if records else None,
               "training_status": payload.get("training_status"),

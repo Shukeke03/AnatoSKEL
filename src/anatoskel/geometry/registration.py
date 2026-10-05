@@ -17,7 +17,7 @@ from scipy.spatial import cKDTree
 import torch
 
 from anatoskel.data.scans import (ScanDataset, canonical_from_mask, label_to_class,
-                                  read_manifest, validate_affine, bone_voxels_world)
+                                  read_manifest, validate_affine, bone_voxels_world, ensure_label_bounds)
 from .meshes import kabsch, transform_points
 
 
@@ -191,7 +191,7 @@ def build_atlas(manifest: str | Path, out_path: str | Path, max_points: int = 20
             raise ValueError("Atlas construction requires training masks")
         affine = validate_affine(scan["affine"])
         volume_per_voxel = abs(np.linalg.det(affine[:3, :3]))
-        for label in torch.unique(scan["labels"]).tolist():
+        for label in sorted(map(int,ensure_label_bounds(scan))):
             label = int(label)
             if (label == 0 or (label_ids is not None and label not in label_ids)
                     or scan["metadata"]["original_truncated"].get(str(label), False)):

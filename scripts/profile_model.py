@@ -98,7 +98,9 @@ def run_profile(config: ModelConfig, *, device: torch.device, coarse_shape: tupl
         with amp:
             context = pack_context(model, rois, queries, device)
             state = model.reconstruct(context, queries, class_ids, anchors)
-        prediction = model.field(context, state, points_world)
+        amp = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
+        with amp:
+            prediction = model.field(context, state, points_world)
         fine_loss = field_loss(prediction["field"], target, prediction["valid"], state["beta"])
         truth = torch.stack([(r["labels"] == 20 + index).float()
                              for index, r in enumerate(rois)]).unsqueeze(1).to(device)

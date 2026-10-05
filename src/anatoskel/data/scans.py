@@ -206,12 +206,15 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         if label_image.shape != image.shape or not nifti_grids_match(image.shape, label_affine, affine):
             raise ValueError("CT and mask must share voxel shape and physical affine")
         raw = np.asarray(label_image.dataobj)
-        if not np.isfinite(raw).all() or not np.allclose(raw, np.rint(raw), atol=1e-6):
-            raise ValueError("Mask must contain finite integer labels")
-        rounded = np.rint(raw)
-        unknown = set(np.unique(rounded)) - {0, *VERSE_IDS}
-        if unknown:
-            raise ValueError(f"Unsupported mask labels: {sorted(unknown)}")
+        if raw.dtype.kind in "iu":
+            rounded = raw
+        else:
+            if not np.isfinite(raw).all() or not np.allclose(raw, np.rint(raw), atol=1e-6):
+                raise ValueError("Mask must contain finite integer labels")
+            rounded = np.rint(raw)
+        supported = np.isin(rounded, [0, *VERSE_IDS])
+        if not supported.all():
+            raise ValueError(f"Unsupported mask labels: {np.unique(rounded[~supported]).tolist()}")
         labels = rounded.astype(np.uint8)
         if not np.allclose(label_affine, affine, atol=1e-5, rtol=0):
             # Label coordinates are preserved and resampled; no grid snapping.
@@ -237,19 +240,36 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Foreground labels may not lie outside valid_mask")
     truncation = {}
     annotation_truncation = {}
+    label_bounds = {}
     if labels is not None:
-        interior = ndimage.binary_erosion(valid, border_value=0)
-        boundary_labels = set(np.unique(labels[~interior]))
-        annotation_truncation = {str(label): label in boundary_labels for label in np.unique(labels) if label}
-        ct_interior = ndimage.binary_erosion(ct_valid, border_value=0)
-        ct_boundary_labels = set(np.unique(labels[~ct_interior]))
-        truncation = {str(label): label in ct_boundary_labels for label in np.unique(labels) if label}
-    ct = 2 * (np.clip(ct, -1000, 2000) + 1000) / 3000 - 1
+        boxes = ndimage.find_objects(labels, max_label=28)
+        label_bounds = {str(i+1):[[s.start,s.stop]for s in box[::-1]]
+                        for i,box in enumerate(boxes) if box is not None}
+        present=[i+1 for i,box in enumerate(boxes) if box is not None]
+        occupied=[box for box in boxes if box is not None]
+        if occupied:
+            region=tuple(slice(max(0,min(b[i].start for b in occupied)-1),
+                               min(labels.shape[i],max(b[i].stop for b in occupied)+1))
+                         for i in range(3))
+            region_labels=labels[region]
+            interior=ndimage.binary_erosion(valid[region],border_value=0)
+            boundary_labels=set(np.unique(region_labels[~interior]))
+            annotation_truncation={str(label):label in boundary_labels for label in present}
+            ct_interior=ndimage.binary_erosion(ct_valid[region],border_value=0)
+            ct_boundary_labels=set(np.unique(region_labels[~ct_interior]))
+            truncation={str(label):label in ct_boundary_labels for label in present}
+    if not ct.flags.writeable:
+        ct=ct.copy()
+    np.clip(ct,-1000,2000,out=ct)
+    ct+=1000
+    ct*=2/3000
+    ct-=1
     metadata = {"patient_id": record.patient_id, "scan_id": record.scan_id,
                 "split": record.split, "ct_path": str(record.ct), "units": "mm",
                 "coordinate_system": "RAS", "original_shape_xyz": list(image.shape),
                 "original_affine": affine.tolist(), "original_truncated": truncation,
                 "annotation_domain_truncated":annotation_truncation,
+                "label_bounds":label_bounds,
                 "ct_voxel_domain": {"shape_xyz": list(image.shape), "affine": affine.tolist()}}
     return {"volume": torch.from_numpy(ct.transpose(2, 1, 0).copy()).unsqueeze(0),
             "labels": None if labels is None else torch.from_numpy(labels.transpose(2, 1, 0).copy()),
@@ -290,13 +310,19 @@ class ScanDataset(Dataset):
         return load_scan(self.records[index])
 
 
-def bone_voxels_world(scan, label_id):
-    """Use tight label bounds to avoid scanning a full CT for each bone geometry call."""
+def ensure_label_bounds(scan):
+    """Linear-time label bounds, avoiding global CPU tensor sorting on whole CTs."""
     if "label_bounds" not in scan["metadata"]:
         boxes = ndimage.find_objects(_numpy(scan["labels"]), max_label=28)
         scan["metadata"]["label_bounds"] = {
             str(i + 1): [[s.start, s.stop] for s in box]
             for i, box in enumerate(boxes) if box is not None}
+    return scan["metadata"]["label_bounds"]
+
+
+def bone_voxels_world(scan, label_id):
+    """Use tight label bounds to avoid scanning a full CT for each bone geometry call."""
+    ensure_label_bounds(scan)
     bounds = scan["metadata"]["label_bounds"].get(str(label_id))
     if bounds is None:
         raise ValueError(f"Label {label_id} is absent")
@@ -345,6 +371,7 @@ def coarse_resample(scan: dict, spacing_mm: float | Sequence[float], order: int 
     source_extent = transform(torch.ones_like(scan["valid_mask"], dtype=torch.uint8), 0, 0).bool()
     prior_artificial = transform(scan.get("artificial_padding_mask", torch.zeros_like(scan["valid_mask"])).to(torch.uint8), 0, 1).bool()
     metadata = dict(scan["metadata"], spacing_mm=spacing.tolist(), resampled=True)
+    metadata.pop("label_bounds",None)
     return {"volume": transform(scan["volume"][0], order, -1).float().unsqueeze(0),
             "labels": None if scan["labels"] is None else transform(scan["labels"], 0, 0).long(),
             "valid_mask": valid & ct_valid, "ct_valid_mask": ct_valid,
@@ -385,14 +412,26 @@ def crop_at_center(scan: dict, center_world, size: int | Sequence[int] = 128,
                                          mode="constant", cval=fill, prefilter=False)
         return torch.from_numpy(result.transpose(2, 1, 0).copy())
 
-    source_extent = cut(torch.ones_like(source["valid_mask"], dtype=torch.uint8), 0, 0).bool()
-    artificial = cut(source.get("artificial_padding_mask", torch.zeros_like(source["valid_mask"])).to(torch.uint8), 0, 1).bool() | ~source_extent
+    # Determine source coverage on the small output grid; never allocate a
+    # full-CT ones/zeros volume separately for every concurrent local ROI.
+    z, y, x = np.ogrid[:size_dhw[0], :size_dhw[1], :size_dhw[2]]
+    extent = np.ones(tuple(size_dhw), dtype=bool)
+    source_shape_xyz = source["valid_mask"].shape[::-1]
+    for axis in range(3):
+        coordinate = (mapping[axis, 0] * x + mapping[axis, 1] * y
+                      + mapping[axis, 2] * z + mapping[axis, 3])
+        extent &= (coordinate >= 0) & (coordinate <= source_shape_xyz[axis] - 1)
+    source_extent = torch.from_numpy(extent)
+    old_artificial = source.get("artificial_padding_mask")
+    artificial = ~source_extent if old_artificial is None else cut(old_artificial, 0, 1).bool() | ~source_extent
     metadata = dict(source["metadata"], crop_center_world=center.tolist(),
                     crop_shape_dhw=size_dhw.tolist(), crop_affine=affine.tolist())
-    ct_valid = cut(source.get("ct_valid_mask", torch.ones_like(source["valid_mask"])).to(torch.uint8), 0, 0).bool()
+    metadata.pop("label_bounds",None)
+    old_ct_valid = source.get("ct_valid_mask")
+    ct_valid = source_extent.clone() if old_ct_valid is None else cut(old_ct_valid, 0, 0).bool()
     return {"volume": cut(source["volume"][0], 1, -1).float().unsqueeze(0),
             "labels": None if source["labels"] is None else cut(source["labels"], 0, 0).long(),
-            "valid_mask": cut(source["valid_mask"].to(torch.uint8), 0, 0).bool() & ct_valid,
+            "valid_mask": cut(source["valid_mask"], 0, 0).bool() & ct_valid,
             "ct_valid_mask": ct_valid,
             "artificial_padding_mask": artificial, "affine": torch.from_numpy(affine), "metadata": metadata}
 

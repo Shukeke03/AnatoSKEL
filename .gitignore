@@ -13,6 +13,7 @@ __pycache__/
 *.nii
 *.nii.gz
 *.obj
+!/examples/first5090/bones.obj
 *.ply
 *.stl
 .env

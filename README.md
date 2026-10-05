@@ -42,7 +42,9 @@ python scripts/smoke.py
 ## 真实数据流程（准备好数据后执行）
 
 采用 **去重的 VerSe 2019/2020 完整重组版**，详见 [数据集与 manifest](docs/datasets.md)。
-本轮未下载真实数据。数据路径通过 JSONL 明确指定；跨患者拆分、重复路径、未知标签与 affine 不一致会报错。
+服务器已下载并校验 374 个真实 CT / 355 名患者，统一清单位于 `data/verse/processed/manifest.jsonl`。
+数据路径通过 JSONL 明确指定；患者跨集合、未知标签和超过容差的网格偏差会报错。
+首轮 RTX 5090 后台实验见 [运行流程](docs/first5090.md)；结果生成前不宣称真实重建性能。
 
 ```bash
 anatoskel inspect-data --manifest data/verse/manifest.jsonl
@@ -94,5 +96,6 @@ OBJ 本身没有单位和骨架层级，因此 JSON 必须与它一起保存。
 当前输出是静态骨表面与关系，不能代表骨小梁、皮质厚度、关节运动学或骨折碎片实例。
 
 24GB 配置采用体素/token 预算、BF16、梯度检查点和每步最多两个骨 ROI；
-尚未在 4090/5090 测显存。租机后首先执行 `doctor --require-cuda` 并测研究配置峰值。
+RTX 5090（约32GB）已通过 CUDA 自检；六个128³局部骨块初测峰值约20.3GiB。
+使用 [5090 配置](configs/autodl_5090.yaml) 运行时仍记录实际步骤速度和显存。
 测试与合成模型能验证代码链路，不能替代真实数据训练和外部验证，也不能证明论文创新性。
