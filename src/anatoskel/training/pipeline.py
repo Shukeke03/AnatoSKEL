@@ -121,6 +121,10 @@ def train_prior(config_path, manifest, output, *, device="auto", epochs=20, max_
                 continue
             roi = crop_bone(scan, label, size=settings["data"]["local_size"],
                             spacing_mm=settings["data"]["local_spacing_mm"])
+            if train_cfg.get("prior_complete_label_ct_coverage", False):
+                # VerSe's fully visualized individual labels define complete
+                # prior shapes; this never changes main-model censorship.
+                roi = dict(roi, valid_mask=roi["ct_valid_mask"])
             try:
                 bone_mask, bone_affine, _ = bone_voxels_world(scan, label)
                 frame = canonical_from_mask(bone_mask, bone_affine)

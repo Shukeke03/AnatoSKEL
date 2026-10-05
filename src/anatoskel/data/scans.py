@@ -236,15 +236,20 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
     if labels is not None and np.any((labels != 0) & ~valid):
         raise ValueError("Foreground labels may not lie outside valid_mask")
     truncation = {}
+    annotation_truncation = {}
     if labels is not None:
         interior = ndimage.binary_erosion(valid, border_value=0)
         boundary_labels = set(np.unique(labels[~interior]))
-        truncation = {str(label): label in boundary_labels for label in np.unique(labels) if label}
+        annotation_truncation = {str(label): label in boundary_labels for label in np.unique(labels) if label}
+        ct_interior = ndimage.binary_erosion(ct_valid, border_value=0)
+        ct_boundary_labels = set(np.unique(labels[~ct_interior]))
+        truncation = {str(label): label in ct_boundary_labels for label in np.unique(labels) if label}
     ct = 2 * (np.clip(ct, -1000, 2000) + 1000) / 3000 - 1
     metadata = {"patient_id": record.patient_id, "scan_id": record.scan_id,
                 "split": record.split, "ct_path": str(record.ct), "units": "mm",
                 "coordinate_system": "RAS", "original_shape_xyz": list(image.shape),
                 "original_affine": affine.tolist(), "original_truncated": truncation,
+                "annotation_domain_truncated":annotation_truncation,
                 "ct_voxel_domain": {"shape_xyz": list(image.shape), "affine": affine.tolist()}}
     return {"volume": torch.from_numpy(ct.transpose(2, 1, 0).copy()).unsqueeze(0),
             "labels": None if labels is None else torch.from_numpy(labels.transpose(2, 1, 0).copy()),

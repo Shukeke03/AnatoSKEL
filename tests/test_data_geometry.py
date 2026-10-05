@@ -227,6 +227,20 @@ def test_original_truncation_is_separate_from_crop_padding(tmp_path):
     assert not crop["valid_mask"][crop["artificial_padding_mask"]].any()
 
 
+def test_annotation_slab_boundary_is_not_a_physical_ct_truncation(tmp_path):
+    labels = np.zeros((24,24,24),np.uint8)
+    labels[7:12,8:14,8:14]=20
+    valid=np.zeros_like(labels)
+    valid[7:12]=1
+    for name,values in (("ct",np.zeros_like(labels,dtype=np.float32)),("mask",labels),("valid",valid)):
+        save_nifti(tmp_path/f"{name}.nii.gz",values,np.eye(4))
+    scan=load_scan({"patient_id":"p","scan_id":"s","split":"train",
+                   "ct":str(tmp_path/'ct.nii.gz'),"mask":str(tmp_path/'mask.nii.gz'),
+                   "valid_mask":str(tmp_path/'valid.nii.gz')})
+    assert not scan['metadata']['original_truncated']['20']
+    assert scan['metadata']['annotation_domain_truncated']['20']
+
+
 def test_annotation_validity_does_not_remove_observable_ct(tmp_path):
     shape, affine = (24, 24, 24), np.eye(4)
     labels = np.zeros(shape, np.uint16)
