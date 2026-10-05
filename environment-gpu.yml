@@ -1,0 +1,7 @@
+# Create later on AutoDL; install cu128 torch BEFORE the editable package.
+name: anatoskel
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
