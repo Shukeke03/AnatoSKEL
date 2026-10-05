@@ -18,7 +18,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 
-from .scans import VERSE_IDS, nifti_affine_mm, validate_affine
+from .scans import VERSE_IDS, nifti_affine_mm, nifti_grid_error_mm, nifti_grids_match, validate_affine
 
 
 OFFICIAL_SOURCES = {
@@ -120,12 +120,12 @@ def _validate_centroids(path):
             raise VerseImportError(f"Nonfinite centroid coordinates: {path}")
 
 
-def _open_image(path, *, reference=None):
+def _open_image(path, *, reference=None, units_override=None):
     image = nib.load(str(path), keep_file_open=True)
     if len(image.shape) != 3:
         raise VerseImportError(f"Expected a 3D NIfTI: {path}")
     try:
-        return image, nifti_affine_mm(image, reference=reference)
+        return image, nifti_affine_mm(image, reference=reference, units_override=units_override)
     except ValueError as exc:
         raise VerseImportError(f"Invalid physical NIfTI geometry: {path}: {exc}") from exc
 
@@ -140,13 +140,14 @@ def _chunks(image, chunk_slices=4):
         yield start, stop, np.asanyarray(image.dataobj[:, :, start:stop])
 
 
-def fingerprint_nifti(path, *, labels=False, chunk_slices=4, reference=None) -> dict[str, Any]:
+def fingerprint_nifti(path, *, labels=False, chunk_slices=4, reference=None,
+                      units_override=None) -> dict[str, Any]:
     """Content SHA256 of scaled voxels plus voxel geometry, independent of gzip/header trivia.
 
     CT values canonicalize to little-endian float32; integer labels to uint16.
     This detects exact voxel/geometry duplicates, not resampled near-duplicates.
     """
-    image, affine = _open_image(path, reference=reference)
+    image, affine = _open_image(path, reference=reference, units_override=units_override)
     geometry = {"shape_xyz": list(image.shape), "affine_ras_mm": np.round(affine, 6).tolist()}
     digest = hashlib.sha256(json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode())
     seen_labels, foreground_count = set(), 0
@@ -176,7 +177,8 @@ def fingerprint_nifti(path, *, labels=False, chunk_slices=4, reference=None) -> 
               "affine_ras_mm": affine.tolist(), "dtype_policy": "uint16" if labels else "float32",
               "fingerprint_scope": "scaled_xyz_voxels_and_mm_affine_rounded_1e-6",
               "source_spatial_units": image.header.get_xyzt_units()[0],
-              "spatial_units_policy": "inherited_from_identical_ct_grid" if
+              "spatial_units_policy": ("inherited_from_matching_ct_grid" if reference is not None
+                                       else "explicit_missing_unit_override") if
               image.header.get_xyzt_units()[0] == "unknown" else "explicit_header"}
     if labels:
         if not foreground_count:
@@ -241,7 +243,8 @@ class _Patients:
 def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path | None = None,
                   require_six_packages: bool = False, require_annotations: bool = True,
                   annotation_domain: bool = True, cross_split_policy: str = "error",
-                  patient_map: str | Path | None = None, progress=None) -> dict[str, Any]:
+                  patient_map: str | Path | None = None, missing_ct_units: str | None = None,
+                  progress=None) -> dict[str, Any]:
     """Validate and import extracted official subject-based archives, failing closed.
 
     Optional ``holdout-priority`` drops lower-priority copies/acquisitions of a
@@ -250,10 +253,13 @@ def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path 
     """
     if cross_split_policy not in ("error", "holdout-priority"):
         raise ValueError("cross_split_policy must be error or holdout-priority")
+    if missing_ct_units is not None and missing_ct_units not in ("mm", "meter", "micron"):
+        raise ValueError("missing_ct_units must be mm/meter/micron")
     manifest = Path(manifest).resolve()
     report_path = Path(report).resolve() if report else manifest.with_suffix(".provenance.json")
     payload = {"status": "preparing", "sources": OFFICIAL_SOURCES,
                "release_format": "complete_subject_based_BIDS", "split_policy": cross_split_policy,
+               "missing_ct_units_override": missing_ct_units,
                "patient_identity": "BIDS sub entity shared across years; split entity identifies scan",
                "annotation_domain_policy": "labeled_bone_superior_envelope" if annotation_domain else "all_ct_unchecked_terminals",
                "discovered_scans": 0, "duplicates": [], "conflicts": [], "dropped": []}
@@ -279,11 +285,12 @@ def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path 
             patients.root(record["patient_id"])
             if progress:
                 progress(f"[{number}/{len(records)}] stream-check {record['scan_id']} ({record['split']})")
-            ct_info = fingerprint_nifti(record["ct"])
-            ct_image, _ = _open_image(record["ct"])
-            mask_info = fingerprint_nifti(record["mask"], labels=True, reference=ct_image)
-            if ct_info["shape_xyz"] != mask_info["shape_xyz"] or not np.allclose(
-                ct_info["affine_ras_mm"], mask_info["affine_ras_mm"], atol=1e-5, rtol=0):
+            ct_info = fingerprint_nifti(record["ct"], units_override=missing_ct_units)
+            ct_image, _ = _open_image(record["ct"], units_override=missing_ct_units)
+            mask_info = fingerprint_nifti(record["mask"], labels=True, reference=ct_image,
+                                         units_override=missing_ct_units)
+            if ct_info["shape_xyz"] != mask_info["shape_xyz"] or not nifti_grids_match(
+                ct_info["shape_xyz"], ct_info["affine_ras_mm"], mask_info["affine_ras_mm"]):
                 raise VerseImportError(f"CT/mask physical grids differ: {record['scan_id']}")
             record.update(ct_info=ct_info, mask_info=mask_info)
             by_content[ct_info["sha256"]].append(record)
@@ -340,10 +347,20 @@ def prepare_verse(root: str | Path, manifest: str | Path, *, report: str | Path 
                        original_patient_id=record["original_patient_id"],
                        original_scan_entity=record["original_scan_entity"],
                        centroid_annotations=[relative(path) for path in record["annotations"]])
+            if record["ct_info"]["source_spatial_units"] == "unknown":
+                row["ct_spatial_units_override"] = missing_ct_units
+            row["mask_grid_policy"] = "nearest_neighbour_resample_to_ct_if_not_identical"
+            alignment_error = nifti_grid_error_mm(record["ct_info"]["shape_xyz"],
+                                                  record["ct_info"]["affine_ras_mm"],
+                                                  record["mask_info"]["affine_ras_mm"])
+            row["mask_alignment_max_error_mm"] = alignment_error
             if annotation_domain:
                 valid_path = manifest.parent / "annotation_valid" / f"{record['scan_id']}_valid.nii.gz"
-                write_annotation_domain(record["mask_info"]["shape_xyz"], record["mask_info"]["affine_ras_mm"],
-                                        record["mask_info"]["annotated_superior_range_mm"], valid_path)
+                low, high = record["mask_info"]["annotated_superior_range_mm"]
+                # Include the corresponding CT centres after the bounded label-grid correction.
+                superior_range = [low - alignment_error, high + alignment_error]
+                write_annotation_domain(record["ct_info"]["shape_xyz"], record["ct_info"]["affine_ras_mm"],
+                                        superior_range, valid_path)
                 row["valid_mask"] = relative(valid_path)
             output.append(row)
         manifest.parent.mkdir(parents=True, exist_ok=True)

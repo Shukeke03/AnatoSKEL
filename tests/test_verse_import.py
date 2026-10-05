@@ -91,17 +91,58 @@ def test_missing_mask_units_import_and_load_with_paired_ct(tmp_path):
     replacement.replace(mask)
     inherited_info = fingerprint_nifti(mask, labels=True, reference=nib.load(ct))
     assert inherited_info["sha256"] == explicit_info["sha256"]
-    assert inherited_info["spatial_units_policy"] == "inherited_from_identical_ct_grid"
+    assert inherited_info["spatial_units_policy"] == "inherited_from_matching_ct_grid"
     with pytest.raises(VerseImportError, match="Spatial units"):
         fingerprint_nifti(mask, labels=True)
     manifest = tmp_path / "manifest.jsonl"
     prepare_verse(raw, manifest)
     row = json.loads(manifest.read_text())
     assert row["mask_source_spatial_units"] == "unknown"
-    assert row["mask_spatial_units_policy"] == "inherited_from_identical_ct_grid"
+    assert row["mask_spatial_units_policy"] == "inherited_from_matching_ct_grid"
     scan = load_scan(read_manifest(manifest)[0])
     assert (scan["labels"] == 20).sum().item() == 216
     assert nib.load(mask).header.get_xyzt_units()[0] == "unknown"
+
+
+def test_unknown_ct_requires_recorded_dataset_unit_override(tmp_path):
+    raw = tmp_path / "raw"
+    ct, mask = case(raw, "dataset-verse19training", "sub-verse004")
+    for path in (ct, mask):
+        image = nib.load(path)
+        image.header.set_xyzt_units("unknown")
+        replacement = path.with_name("replacement.nii.gz")
+        nib.save(image, replacement)
+        replacement.replace(path)
+    manifest = tmp_path / "manifest.jsonl"
+    with pytest.raises(VerseImportError, match="Spatial units"):
+        prepare_verse(raw, manifest)
+    report = prepare_verse(raw, manifest, missing_ct_units="mm")
+    assert report["missing_ct_units_override"] == "mm"
+    assert json.loads(manifest.read_text())["ct_spatial_units_override"] == "mm"
+    record = read_manifest(manifest)[0]
+    assert record.ct_spatial_units_override == "mm"
+    assert (load_scan(record)["labels"] == 20).sum().item() == 216
+    assert nib.load(ct).header.get_xyzt_units()[0] == "unknown"
+
+
+def test_small_mask_grid_drift_resamples_and_large_drift_fails(tmp_path):
+    raw = tmp_path / "raw"
+    ct, mask = case(raw, "dataset-verse20training", "sub-verse577")
+    image = nib.load(mask)
+    values = np.asarray(image.dataobj)
+    affine = image.affine.copy()
+    affine[2, 2] += 0.00009
+    drifted = nib.Nifti1Image(values, affine)
+    nib.save(drifted, mask)
+    manifest = tmp_path / "manifest.jsonl"
+    prepare_verse(raw, manifest)
+    scan = load_scan(read_manifest(manifest)[0])
+    np.testing.assert_allclose(scan["affine"], nib.load(ct).affine)
+    np.testing.assert_array_equal(scan["labels"].numpy(), values.transpose(2, 1, 0))
+    affine[0, 3] += 1.0
+    nib.save(nib.Nifti1Image(values, affine), mask)
+    with pytest.raises(VerseImportError, match="matching explicit CT grid"):
+        prepare_verse(raw, manifest)
 
 
 def test_fingerprint_streams_without_full_proxy_array_and_normalizes_dtype(tmp_path, monkeypatch):

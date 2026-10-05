@@ -21,6 +21,8 @@ def main():
     parser.add_argument("--cross-split-policy", choices=("error", "holdout-priority"), default="error",
                         help="Default fails closed; explicit holdout-priority drops lower-split patient copies")
     parser.add_argument("--patient-map", help="Optional explicit JSON subject-to-patient identity mapping")
+    parser.add_argument("--missing-ct-units", choices=("mm", "meter", "micron"),
+                        help="Explicit dataset-backed units only for CT headers missing units; recorded in manifest")
     args = parser.parse_args()
     try:
         report = prepare_verse(args.root, args.manifest, report=args.report,
@@ -28,6 +30,7 @@ def main():
                                require_annotations=not args.allow_missing_centroids,
                                annotation_domain=not args.no_annotation_domain,
                                cross_split_policy=args.cross_split_policy, patient_map=args.patient_map,
+                               missing_ct_units=args.missing_ct_units,
                                progress=lambda message: print(message, flush=True))
     except VerseImportError as exc:
         print(str(exc), file=sys.stderr)

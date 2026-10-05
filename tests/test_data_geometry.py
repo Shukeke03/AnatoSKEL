@@ -11,6 +11,7 @@ from anatoskel.data import (ScanDataset, canonical_from_mask, coarse_resample,
                            label_to_class, load_scan, mask_tsdf, read_manifest,
                            sample_supervision)
 from anatoskel.geometry import export_meshes, kabsch, mesh_field, mesh_mask, transform_points
+from anatoskel.data.scans import nifti_grids_match
 
 
 def save_nifti(path, values, affine, units="mm"):
@@ -85,8 +86,19 @@ def test_missing_mask_units_inherit_only_identical_explicit_ct_grid(tmp_path):
     shifted = affine.copy()
     shifted[0, 3] = 0.001
     save_nifti(mask_path, labels, shifted, "unknown")
-    with pytest.raises(ValueError, match="identical explicit CT grid"):
+    with pytest.raises(ValueError, match="matching explicit CT grid"):
         load_scan(record)
+
+
+def test_grid_rounding_guard_checks_full_field_of_view():
+    ct = np.diag([0.82, 0.82, 0.6, 1.0])
+    mask = ct.copy()
+    mask[2, 2] += 0.00009
+    assert nifti_grids_match((556, 512, 1284), ct, mask)
+    assert not nifti_grids_match((556, 512, 3000), ct, mask)
+    shifted = ct.copy()
+    shifted[0, 3] = 0.2
+    assert not nifti_grids_match((556, 512, 1284), ct, shifted)
 
 
 def test_resample_and_exact_physical_crop_preserve_frames(tmp_path):

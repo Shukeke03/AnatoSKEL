@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import nibabel as nib
+from nibabel.processing import resample_from_to
 import numpy as np
 from scipy import ndimage
 import torch
@@ -38,6 +39,7 @@ class ManifestRecord:
     mask: Path | None = None
     valid_mask: Path | None = None
     ct_valid_mask: Path | None = None
+    ct_spatial_units_override: str | None = None
 
 
 def _record(data: dict[str, Any], parent: Path) -> ManifestRecord:
@@ -49,6 +51,9 @@ def _record(data: dict[str, Any], parent: Path) -> ManifestRecord:
             raise ValueError(f"Manifest {key} must be a nonempty string")
     if data["split"] not in ("train", "val", "test"):
         raise ValueError("Manifest split must be train, val, or test")
+    override = data.get("ct_spatial_units_override")
+    if override is not None and override not in ("mm", "meter", "micron"):
+        raise ValueError("Manifest CT units override must be mm/meter/micron")
 
     def path(key):
         value = data.get(key)
@@ -60,7 +65,7 @@ def _record(data: dict[str, Any], parent: Path) -> ManifestRecord:
         return (parent / result).resolve() if not result.is_absolute() else result.resolve()
 
     return ManifestRecord(data["patient_id"], data["scan_id"], data["split"],
-                          path("ct"), path("mask"), path("valid_mask"), path("ct_valid_mask"))
+                          path("ct"), path("mask"), path("valid_mask"), path("ct_valid_mask"), override)
 
 
 def read_manifest(path: str | Path) -> list[ManifestRecord]:
@@ -122,16 +127,48 @@ def _spacing(value: float | Sequence[float]) -> np.ndarray:
     return result
 
 
-def nifti_affine_mm(image, *, reference=None):
-    """Read physical geometry; missing mask units require an identical explicit CT grid."""
+def nifti_grid_error_mm(shape, one, two):
+    """Maximum physical displacement over the eight voxel-centre FOV corners."""
+    one, two = validate_affine(one), validate_affine(two)
+    corners = np.array([[x, y, z, 1] for x in (0, shape[0] - 1)
+                        for y in (0, shape[1] - 1) for z in (0, shape[2] - 1)])
+    return float(np.linalg.norm((corners @ (one - two).T)[:, :3], axis=1).max())
+
+
+def nifti_grids_match(shape, one, two):
+    """Bound grid displacement at all corners to 0.2 mm and a quarter voxel.
+
+    Used only to accept a near-aligned label for nearest-neighbour resampling;
+    the CT affine is never silently assigned to label voxels.
+    """
+    one, two = validate_affine(one), validate_affine(two)
+    error = nifti_grid_error_mm(shape, one, two)
+    spacing = min(np.linalg.norm(one[:3, :3], axis=0).min(),
+                  np.linalg.norm(two[:3, :3], axis=0).min())
+    return bool(error <= min(0.2, spacing / 4))
+
+
+def nifti_affine_mm(image, *, reference=None, units_override=None):
+    """Read geometry with an explicit missing-unit override or paired CT reference."""
     units = image.header.get_xyzt_units()[0]
     factors = {"mm": 1.0, "meter": 1000.0, "micron": 0.001}
+    if units_override is not None and units_override not in factors:
+        raise ValueError("Spatial units override must be mm/meter/micron")
     if units == "unknown" and reference is not None:
         reference_units = reference.header.get_xyzt_units()[0]
+        if reference_units == "unknown":
+            reference_units = units_override
+        factor = factors.get(reference_units, 1)
+        candidate = np.asarray(image.affine).copy()
+        candidate[:3] *= factor
+        ref_affine = np.asarray(reference.affine).copy()
+        ref_affine[:3] *= factor
         if (reference_units not in factors or image.shape != reference.shape
-                or not np.allclose(image.affine, reference.affine, atol=1e-5, rtol=0)):
-            raise ValueError("Spatial units missing: inheritance requires an identical explicit CT grid")
+                or not nifti_grids_match(image.shape, candidate, ref_affine)):
+            raise ValueError("Spatial units missing: inheritance requires a matching explicit CT grid")
         units = reference_units
+    elif units == "unknown" and units_override is not None:
+        units = units_override
     if units not in factors:
         raise ValueError(f"Spatial units must be explicit mm/meter/micron; got {units}")
     affine = np.asarray(image.affine, dtype=np.float64).copy()
@@ -139,11 +176,11 @@ def nifti_affine_mm(image, *, reference=None):
     return validate_affine(affine)
 
 
-def _load_nifti(path: Path, *, reference=None):
+def _load_nifti(path: Path, *, reference=None, units_override=None):
     image = nib.load(str(path))
     if len(image.shape) != 3:
         raise ValueError(f"Expected a 3D NIfTI at {path}, got {image.shape}")
-    return image, nifti_affine_mm(image, reference=reference)
+    return image, nifti_affine_mm(image, reference=reference, units_override=units_override)
 
 
 def _truncated(mask_xyz: np.ndarray, valid_xyz: np.ndarray) -> bool:
@@ -158,14 +195,15 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
     valid_mask is annotation validity; ct_valid_mask is actual CT coverage.
     """
     record = record if isinstance(record, ManifestRecord) else _record(record, Path.cwd())
-    image, affine = _load_nifti(record.ct)
+    image, affine = _load_nifti(record.ct, units_override=record.ct_spatial_units_override)
     ct = np.asarray(image.dataobj, dtype=np.float32)
     if not np.isfinite(ct).all():
         raise ValueError("CT contains nonfinite intensities")
     labels = None
     if record.mask is not None:
-        label_image, label_affine = _load_nifti(record.mask, reference=image)
-        if label_image.shape != image.shape or not np.allclose(label_affine, affine, atol=1e-5):
+        label_image, label_affine = _load_nifti(record.mask, reference=image,
+                                              units_override=record.ct_spatial_units_override)
+        if label_image.shape != image.shape or not nifti_grids_match(image.shape, label_affine, affine):
             raise ValueError("CT and mask must share voxel shape and physical affine")
         raw = np.asarray(label_image.dataobj)
         if not np.isfinite(raw).all() or not np.allclose(raw, np.rint(raw), atol=1e-6):
@@ -174,6 +212,11 @@ def load_scan(record: ManifestRecord | dict[str, Any]) -> dict[str, Any]:
         unknown = set(np.unique(labels)) - {0, *VERSE_IDS}
         if unknown:
             raise ValueError(f"Unsupported mask labels: {sorted(unknown)}")
+        if not np.allclose(label_affine, affine, atol=1e-5, rtol=0):
+            # Label coordinates are preserved and resampled; no grid snapping.
+            physical_mask = nib.Nifti1Image(raw, label_affine)
+            labels = np.asarray(resample_from_to(physical_mask, (image.shape, affine), order=0,
+                                                mode="constant", cval=0).dataobj, dtype=np.int64)
     def load_coverage(path, kind):
         valid_image, valid_affine = _load_nifti(path)
         if valid_image.shape != image.shape or not np.allclose(valid_affine, affine, atol=1e-5):
