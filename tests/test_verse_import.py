@@ -64,6 +64,21 @@ def test_preserves_six_official_splits_and_patient_scan_entities(tmp_path):
     assert identities == {"verse201", "verse253"}
 
 
+def test_gl_subjects_preserve_namespace_and_official_split(tmp_path):
+    raw = tmp_path / "raw"
+    case(raw, "dataset-verse19training", "sub-verse003", seed=1)
+    case(raw, "dataset-verse20test", "sub-gl003", seed=2)
+    case(raw, "dataset-verse20validation", "sub-GL004", seed=3)
+    manifest = tmp_path / "manifest.jsonl"
+    report = prepare_verse(raw, manifest)
+    records = read_manifest(manifest)
+    assert report["retained_patients"] == 3
+    assert {record.patient_id: record.split for record in records} == {
+        "sub-verse003": "train", "sub-gl003": "test", "sub-gl004": "val"}
+    assert {record.scan_id for record in records} == {
+        "sub-verse003", "sub-gl003", "sub-gl004"}
+
+
 def test_fingerprint_streams_without_full_proxy_array_and_normalizes_dtype(tmp_path, monkeypatch):
     ct, _ = case(tmp_path, "dataset-verse19training", "sub-verse004")
     image = nib.load(ct)

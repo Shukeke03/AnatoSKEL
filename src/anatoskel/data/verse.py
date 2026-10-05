@@ -1,7 +1,7 @@
 """Low-memory importer for the official six VerSe-complete BIDS archives.
 
 The subject-based release already removes the cross-year challenge overlap.
-Patient identity is the BIDS ``sub-verseNNN`` entity, not the original scan ID
+Patient identity is the BIDS ``sub-verseNNN`` or ``sub-glNNN`` entity, not the original scan ID
 in ``split-verseNNN``. No random splitting or year-based patient offset occurs.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ OFFICIAL_SOURCES = {
     "paper": "https://arxiv.org/abs/2001.09193",
 }
 PACKAGE_PATTERN = re.compile(r"dataset-verse(19|20)(training|validation|test)$", re.I)
-SUBJECT_PATTERN = re.compile(r"sub-verse(\d+)(?=_|$)", re.I)
+SUBJECT_PATTERN = re.compile(r"sub-(verse|gl)(\d+)(?=_|$)", re.I)
 SPLIT_MAP = {"training": "train", "validation": "val", "test": "test"}
 
 
@@ -45,7 +45,7 @@ def _subject(prefix: str) -> str:
     match = SUBJECT_PATTERN.match(prefix)
     if not match:
         raise VerseImportError(f"Not a subject-based BIDS VerSe scan: {prefix}")
-    return f"sub-verse{int(match[1]):03d}"
+    return f"sub-{match[1].lower()}{int(match[2]):03d}"
 
 
 def discover_verse(root: str | Path, *, require_annotations: bool = True) -> list[dict[str, Any]]:
@@ -89,7 +89,7 @@ def discover_verse(root: str | Path, *, require_annotations: bool = True) -> lis
                 raise VerseImportError(f"Missing centroid annotation for {ct}")
             for annotation in annotations:
                 _validate_centroids(annotation)
-            records.append({"patient_id": subject, "scan_id": re.sub(r"^sub-verse\d+", subject, prefix),
+            records.append({"patient_id": subject, "scan_id": SUBJECT_PATTERN.sub(subject, prefix, count=1),
                             "split": split, "ct": ct, "mask": masks[0], "annotations": sorted(annotations),
                             "source_package": package.name, "source_year": year,
                             "original_scan_entity": re.search(r"(?:^|_)split-(verse\d+)", prefix).group(1)
