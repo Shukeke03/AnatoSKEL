@@ -1,0 +1,65 @@
+{
+  "run": "first5090",
+  "model": "AnatoSKEL",
+  "trained_on_real_CT": true,
+  "epochs": 100,
+  "steps": 14100,
+  "prior_epochs": 100,
+  "example": {
+    "scan_id": "sub-gl279_dir-ax",
+    "patient_id": "sub-gl279",
+    "selection": "first sorted official test scan with >=4 published lumbar centroids; fixed before optimization",
+    "inference_inputs": "CT and affine only; no labels, GT centroids or GT ROIs",
+    "vertices": 138568,
+    "faces": 277197,
+    "nonempty_model_prediction": true
+  },
+  "validation": {
+    "mean_dice": 0.5140802492472052,
+    "evaluated_bones": 479,
+    "scans_with_lumbar_ground_truth": 97,
+    "detected_gt_bones": 464,
+    "per_label_dice": {
+      "20": 0.4841587241533453,
+      "21": 0.5439550161725137,
+      "22": 0.5352166092463689,
+      "23": 0.5250288054024077,
+      "24": 0.5642120648649878,
+      "25": 0.05900982155523023
+    },
+    "missed_bones_score_zero": true,
+    "predicted_roi": true
+  },
+  "test": {
+    "mean_dice": 0.55300030001664,
+    "evaluated_bones": 463,
+    "scans_with_lumbar_ground_truth": 94,
+    "detected_gt_bones": 438,
+    "per_label_dice": {
+      "20": 0.4894513642502096,
+      "21": 0.5183682701111918,
+      "22": 0.576284633236043,
+      "23": 0.6293940857149113,
+      "24": 0.6487562777969128,
+      "25": 0.13382704303129153
+    },
+    "missed_bones_score_zero": true,
+    "predicted_roi": true
+  },
+  "units": "mm",
+  "coordinate_system": "RAS",
+  "clinical_validation": false,
+  "phase_seconds": {
+    "doctor": 2.234129972755909,
+    "atlas": 40.80753035470843,
+    "prior": 907.6941619347781,
+    "prior_audit": 3.2074995283037424,
+    "train": 24728.26021897979,
+    "model_audit": 4.392098844051361,
+    "val": 3610.2008114904165,
+    "test": 3987.386854287237,
+    "example": 13.490855460986495
+  },
+  "finished_utc": "2026-10-06T00:50:22.805847+00:00",
+  "prediction_source": "learned model with predicted ROIs; no ground-truth mesh substitution"
+}
