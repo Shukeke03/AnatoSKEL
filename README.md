@@ -1,101 +1,53 @@
 # AnatoSKEL
 
-**Patient-Specific Bone Reconstruction from CT with Anatomical Shape Priors**
+**CT → 逐椎体几何查询 → 条件潜空间扩散 → 扫描范围内的 3D 骨表面**
 
-研究代码：CT 体数据 → 椎体实例与编号 → 独立刚体姿态、形状先验与 CT 残差场 → 患者坐标下的骨表面。
-首期针对 VerSe 腰椎，骨盆作为后续任务。
+首期任务是 VerSe 腰椎重建。v1.0 已实现共享 Swin Transformer、物理坐标下的结构化查询、完整形状 AE、残差 DiT、真实截断病例的采样末段 adapter，以及多 tile 连续场融合。输出为 RAS 毫米坐标的 `bones_observed.obj + bones.json`。
 
-当前已实现本地可运行的模型、prior/主模型训练、预测 ROI 推理、验证与 `OBJ + JSON` 导出。
-仅做过合成数据的软件验证，没有真实 CT 训练权重或医学重建性能结果。
-合成 checkpoint 有明确标记，默认不能作为普通推理权重使用。
+版本记录：
 
-实现借鉴 [HSMR](https://github.com/IsshikiHugh/HSMR) 的图像特征→参数查询与
-[SKEL](https://github.com/MarilynKeller/SKEL) 的形状/姿态分离思想。
-这里重新实现 CT 编码和逐椎体隐式几何，不依赖 SMPL/SKEL 受限模型资产或其人体 RGB 权重。
-代码 MIT；训练数据按各自许可管理，医学影像、权重与生成网格默认不提交 Git。
+- **v0.1**：Git 标签 `v0.1`，保存首轮 CNN/attention/形状先验基线及已有演示。首轮真实训练结果见 [first5090](docs/first5090.md) 和 [示例](examples/first5090/README.md)。
+- **v1.0**：新版 Transformer 与扩散实现。已完成软件测试和合成四阶段训练/导出检查，尚无新版真实 CT 训练精度结果。v0.1 权重不能直接加载为 v1.0 权重。
+
+代码与数据集按各自许可管理；医学影像、训练权重和新生成结果不提交 Git。GitHub 仓库保持私密。实现借鉴 HSMR/VGGT 的结构化几何推理，不依赖受限 SMPL/SKEL 资产或 RGB 模型权重。
 
 ## 本地环境
 
-已创建 Miniforge 环境 `anatoskel`：Python **3.11.16**、PyTorch **2.8.0**。
+Miniforge 环境 `anatoskel`，Python **3.11**、PyTorch **2.8.0**、MONAI **1.5.1**、einops **0.8.1**。AutoDL 继续使用 **PyTorch 2.8.0+cu128 / CUDA 12.8**；macOS 使用 CPU wheel。
 
 ```bash
 conda activate anatoskel
-cd /Users/shuxing/AIlearning/AnatoSKEL
-anatoskel doctor
+python -m pip install -e '.[dev]'
+ruff check .
 pytest -q
+python scripts/smoke_v1.py
 ```
 
-在另一台机器复建本地环境：`conda env create -f environment-local.yml`。
-Linux 服务器使用 **PyTorch 2.8.0+cu128 / CUDA 12.8 / Python 3.11**，
-安装命令、驱动与系统要求见 [AutoDL 配置](docs/autodl.md)。本地 macOS 不安装 CUDA。
+合成检查产物仅用于软件流程验证，不代表医学重建效果。详见 [v1.0 架构与运行说明](docs/v1.md)，服务器安装见 [AutoDL](docs/autodl.md)。
 
-## 验证完整软件流程
+## v1.0 训练
+
+四阶段依次运行 `train-v1 --stage shape/ct/diffusion/partial`，后续阶段通过 `--init` 加载前一阶段 checkpoint；同一阶段通过 `--resume` 继续。完整命令见 [训练流程](docs/v1.md#training-stages)。
 
 ```bash
-python scripts/smoke.py
+anatoskel train-v1 --stage shape --config configs/v1_autodl_4090.yaml \
+  --manifest data/verse/processed/manifest.jsonl --output outputs/v1/shape --device cuda
 ```
 
-该命令只生成小型椭球 NIfTI，检查 prior 优化、主模型反向传播、checkpoint、推理、验证与参考网格导出。
-结果在 `outputs/smoke/`；`reference/` 是标注表面，`prediction/` 是模型实际预测，两者元数据明确区分。
-只训练几个步骤时预测可能为空或错误，这不是医学性能演示。
+采用现有去重 VerSe 2019/2020 数据与患者级划分。完整骨体训练形状 AE 和标准扩散；真实截断骨体通过可靠可见域损失训练，不伪造完整 latent 真值。人工缺失在 CT 编码前生成，完整 GT 仅进入损失。
 
-## 真实数据流程（准备好数据后执行）
+若使用 VoCo-B 预训练，先在配置中指定 `model.pretrained_encoder`。代码会检查实际加载覆盖率；未指定权重时使用随机初始化，不宣称已使用预训练。
 
-采用 **去重的 VerSe 2019/2020 完整重组版**，详见 [数据集与 manifest](docs/datasets.md)。
-服务器已下载并校验 374 个真实 CT / 355 名患者，统一清单位于 `data/verse/processed/manifest.jsonl`。
-数据路径通过 JSONL 明确指定；患者跨集合、未知标签和超过容差的网格偏差会报错。
-首轮 RTX 5090 后台实验见 [运行流程](docs/first5090.md)；结果生成前不宣称真实重建性能。
+默认每个 CT 步处理一份全局影像和最多两个骨实例，使用 BF16 与梯度 checkpoint。24GB/32GB 显卡的实际峰值和速度仍需在服务器测量后确定。
+
+## 推理与输出
 
 ```bash
-anatoskel inspect-data --manifest data/verse/manifest.jsonl
-anatoskel build-atlas --manifest data/verse/manifest.jsonl --output outputs/atlas.json
-anatoskel train-prior --config configs/research.yaml --manifest data/verse/manifest.jsonl \
-  --atlas outputs/atlas.json --output outputs/prior --device cuda
-anatoskel train --config configs/research.yaml --manifest data/verse/manifest.jsonl \
-  --prior outputs/prior/prior.pt --output outputs/train --device cuda
-anatoskel evaluate --checkpoint outputs/train/model.pt --manifest data/verse/manifest.jsonl \
-  --split val --output outputs/val.json --device cuda
-anatoskel infer --checkpoint outputs/train/model.pt --manifest data/verse/manifest.jsonl \
-  --split test --output outputs/prediction --device cuda
+anatoskel infer --checkpoint outputs/v1/partial/model.pt \
+  --manifest data/verse/processed/manifest.jsonl --split test \
+  --output outputs/v1/prediction --device cuda
 ```
 
-Atlas 只用完整、稳定的训练骨实例建立固定 canonical frame；PCA 只作初始化。
-多起点 trimmed ICP 提供弱姿态质量标志；部分视野、轴对称或配准多解时关闭姿态监督。
-**配准通过不代表解剖轴获得临床验证**。真实数据阶段需要人工检查模板/配准质量与有效域，再决定接受哪些弱标签。
-不提供 atlas 时允许训练 provisional PCA prior，但不能据此宣称解剖姿态精度。
+推理只读取 CT 与扫描覆盖，不使用 GT 标签、GT 中心或标注有效域。所有 tile 共用同一实例参考系及同一扩散 latent，融合场后统一提取网格。真实扫描截断处保留开放边界，默认不导出扫描外生成的完整骨体。JSON 保存坐标、覆盖、截断与训练来源说明。
 
-主训练分开反传粗/细分支，以释放全扫描激活；粗 query 在细分支入口 detach。
-ROI 从 GT 中心加扰动逐步切换到预测中心，预测阶段漏裁不会用 GT ROI 补回。
-验证始终使用预测 ROI，并将未检测到的 GT 骨记为 Dice=0。
-训练定期保存 optimizer、扫描位置和随机状态；继续使用 `anatoskel train ... --resume outputs/train/model.pt`。
-
-## 架构与输出
-
-完整规格见 [模型架构](docs/architecture.md)，研究配置见 [research.yaml](configs/research.yaml)。
-卷积 LeakyReLU(0.01)，attention FFN 使用 GELU，隐式场 MLP 使用 Softplus(β=20)，场输出为线性。
-
-```mermaid
-flowchart LR
-    CT[CT 与 affine] --> C[全扫描 3D 编码与 query decoder]
-    C --> M[椎体 mask / 类别 / 中心]
-    M --> ROI[逐骨物理 ROI]
-    ROI --> F[局部 3D 编码]
-    C --> P[R / t / beta 初始化]
-    F --> S[Canonical prior + CT 残差场]
-    P --> S
-    S --> A[共享两轮 point 与骨间 attention]
-    A --> S
-    S --> E[有效观测域零等值面]
-    E --> O[bones.obj + bones.json]
-```
-
-`bones.obj` 每块骨一个对象；坐标是 **RAS 毫米**。
-`bones.json` 保存 CT affine、骨编号、刚体变换、形状代码、相对变换、可见性和边界信息。
-OBJ 本身没有单位和骨架层级，因此 JSON 必须与它一起保存。
-原 CT 外部不生成可信表面；截断边界保持开放，不人为封口。病理残差没有固定幅度上限。
-当前输出是静态骨表面与关系，不能代表骨小梁、皮质厚度、关节运动学或骨折碎片实例。
-
-24GB 配置采用体素/token 预算、BF16、梯度检查点和每步最多两个骨 ROI；
-RTX 5090（约32GB）已通过 CUDA 自检；六个128³局部骨块初测峰值约20.3GiB。
-使用 [5090 配置](configs/autodl_5090.yaml) 运行时仍记录实际步骤速度和显存。
-测试与合成模型能验证代码链路，不能替代真实数据训练和外部验证，也不能证明论文创新性。
+旧版 `train-prior`、`train`、`scripts/run_autodl.py` 及旧配置保留用于 v0.1 复现；旧模型架构见 [baseline architecture](docs/architecture.md)。`infer` 与 `evaluate` 按 checkpoint schema 自动选择版本。

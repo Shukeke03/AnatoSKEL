@@ -14,6 +14,8 @@ from anatoskel.training.pipeline import train_model, train_prior
 
 def main():
     parser = argparse.ArgumentParser(prog="anatoskel")
+    from anatoskel import __version__
+    parser.add_argument("--version", action="version", version=f"AnatoSKEL {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     health = commands.add_parser("doctor", help="Test installed PyTorch operations")
     health.add_argument("--require-cuda", action="store_true")
@@ -41,6 +43,15 @@ def main():
     training.add_argument("--prior")
     training.add_argument("--resume")
     training.add_argument("--allow-uninitialized-prior", action="store_true")
+    versioned = commands.add_parser("train-v1", help="Train v1 shape/CT/diffusion/partial stage")
+    versioned.add_argument("--config", default="configs/v1_research.yaml")
+    versioned.add_argument("--manifest", required=True)
+    versioned.add_argument("--output", required=True)
+    versioned.add_argument("--stage", required=True, choices=("shape", "ct", "diffusion", "partial"))
+    versioned.add_argument("--device", default="auto")
+    versioned.add_argument("--init", help="Initialize next stage from a v1 checkpoint")
+    versioned.add_argument("--resume", help="Resume the same stage, optimizer and cursor")
+    versioned.add_argument("--max-steps", type=int)
     inference = commands.add_parser("infer", help="CT -> predicted ROI -> observed OBJ surfaces")
     evaluation = commands.add_parser("evaluate", help="Evaluate predicted-ROI Dice, including misses")
     for command in (inference, evaluation):
@@ -79,6 +90,9 @@ def main():
     elif command == "train":
         values["prior_path"] = values.pop("prior")
         result = train_model(values.pop("config"), **values)
+    elif command == "train-v1":
+        from anatoskel.v1.pipeline import train_v1
+        result = train_v1(values.pop("config"), **values)
     elif command == "infer":
         result = infer_manifest(**values)
     elif command == "evaluate":

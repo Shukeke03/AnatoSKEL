@@ -14,7 +14,8 @@ def save_checkpoint(path, model, config, *, optimizer=None, step=0, kind="model"
                     provenance=None, extra=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": SCHEMA_VERSION, "kind": kind,
+    schema = 2 if getattr(config, "architecture", None) == "anatoskel_v1" else SCHEMA_VERSION
+    payload = {"schema_version": schema, "kind": kind,
                "model_config": config.to_dict(), "state_dict": model.state_dict(),
                "step": step, "torch_version": str(torch.__version__),
                "provenance": provenance or {}, "rng_state": torch.get_rng_state(),
@@ -35,9 +36,13 @@ def save_checkpoint(path, model, config, *, optimizer=None, step=0, kind="model"
 def load_checkpoint(path, map_location="cpu", expected_kind=None):
     # Only tensors and primitive metadata are serialized; no executable objects.
     payload = torch.load(path, map_location=map_location, weights_only=True)
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    if payload.get("schema_version") not in (SCHEMA_VERSION, 2):
         raise ValueError("Unsupported checkpoint schema")
     if expected_kind and payload["kind"] != expected_kind:
         raise ValueError(f"Expected a {expected_kind} checkpoint")
-    ModelConfig.from_dict(payload["model_config"])
+    if payload["schema_version"] == 2:
+        from anatoskel.v1.config import V1Config
+        V1Config.from_dict(payload["model_config"])
+    else:
+        ModelConfig.from_dict(payload["model_config"])
     return payload

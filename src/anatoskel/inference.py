@@ -129,6 +129,11 @@ def predict_scan(model, scan, settings, device, *, score_threshold=None, label_i
 
 def infer_manifest(checkpoint, manifest, output, *, device="auto", split="test",
                    allow_synthetic=False, score_threshold=None):
+    payload = load_checkpoint(checkpoint, expected_kind="model")
+    if payload["schema_version"] == 2:
+        from anatoskel.v1.inference import infer_manifest as infer_v1
+        return infer_v1(checkpoint, manifest, output, device=device, split=split,
+                        allow_synthetic=allow_synthetic, score_threshold=score_threshold)
     model, payload, device = load_model(checkpoint, device)
     if payload.get("training_status") == "synthetic_check" and not allow_synthetic:
         raise ValueError("This checkpoint was trained on synthetic fixtures; use --allow-synthetic for software checks")
@@ -154,6 +159,11 @@ def evaluate_manifest(checkpoint, manifest, output, *, device="auto", split="val
                       allow_synthetic=False):
     """Predicted ROI volumetric Dice in native CT coordinates; missed bones score 0."""
     from scipy import ndimage
+    payload = load_checkpoint(checkpoint, expected_kind="model")
+    if payload["schema_version"] == 2:
+        from anatoskel.v1.inference import evaluate_manifest as evaluate_v1
+        return evaluate_v1(checkpoint, manifest, output, device=device, split=split,
+                           allow_synthetic=allow_synthetic)
     model, payload, device = load_model(checkpoint, device)
     if payload.get("training_status") == "synthetic_check" and not allow_synthetic:
         raise ValueError("Synthetic checkpoint evaluation requires --allow-synthetic")
