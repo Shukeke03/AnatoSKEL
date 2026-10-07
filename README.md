@@ -11,6 +11,18 @@
 
 代码与数据集按各自许可管理；医学影像、训练权重和新生成结果不提交 Git。GitHub 仓库保持私密。实现借鉴 HSMR/VGGT 的结构化几何推理，不依赖受限 SMPL/SKEL 资产或 RGB 模型权重。
 
+## 模型架构图
+
+按两个版本标签的实际代码绘制，包含层数、注意力头、FFN 激活函数、训练支路与 OBJ 导出流程。[图解与代码依据](docs/architecture_figures.md)。
+
+**v0.1：独立粗/细 ResUNet → 几何查询细化 → 隐式先验 + CT 残差场。** [SVG](docs/figures/anatoskel-v0.1-architecture.svg)
+
+![AnatoSKEL v0.1 architecture](docs/figures/anatoskel-v0.1-architecture.png)
+
+**v1.0：共享 Swin → 结构化查询 → 残差潜空间扩散 → 多 tile 连续场融合。** [SVG](docs/figures/anatoskel-v1.0-architecture.svg)
+
+![AnatoSKEL v1.0 architecture](docs/figures/anatoskel-v1.0-architecture.png)
+
 ## 本地环境
 
 Miniforge 环境 `anatoskel`，Python **3.11**、PyTorch **2.8.0**、MONAI **1.5.1**、einops **0.8.1**。AutoDL 继续使用 **PyTorch 2.8.0+cu128 / CUDA 12.8**；macOS 使用 CPU wheel。
