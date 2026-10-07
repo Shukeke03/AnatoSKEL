@@ -1,12 +1,16 @@
 # AnatoSKEL 版本架构图
 
-两张图分别对应已保存的 Git 标签 **v0.1（`2d732ae`）**和 **v1.0（`90fe833`）**，依据实际实现与默认研究配置绘制。图中次数表示模块堆叠或迭代次数，非训练 epoch；实线表示推理数据流，虚线表示训练专用支路。跨模块传递的查询、上下文和缓存特征在框内注明，箭头对主流程作概括。
+架构图提供中、英文两套，分别对应已保存的 Git 标签 **v0.1（`2d732ae`）**和 **v1.0（`90fe833`）**，依据实际实现与默认研究配置绘制。中英文版共用布局与数据流，公式、变量名和常用模型缩写保持一致。图中次数表示模块堆叠或迭代次数，非训练 epoch；实线表示推理数据流，虚线表示训练专用支路。跨模块传递的查询、上下文和缓存特征在框内注明，箭头对主流程作概括。
 
 ## v0.1：双编码器与隐式形状先验
 
 ![AnatoSKEL v0.1 architecture](figures/anatoskel-v0.1-architecture.png)
 
-[矢量 SVG](figures/anatoskel-v0.1-architecture.svg) · [高清 PNG](figures/anatoskel-v0.1-architecture.png) · [详细架构说明](architecture.md)
+[英文 SVG](figures/anatoskel-v0.1-architecture.svg) · [英文 PNG](figures/anatoskel-v0.1-architecture.png) · [详细架构说明](architecture.md)
+
+![AnatoSKEL v0.1 中文架构图](figures/anatoskel-v0.1-architecture-zh.png)
+
+[中文 SVG](figures/anatoskel-v0.1-architecture-zh.svg) · [中文 PNG](figures/anatoskel-v0.1-architecture-zh.png)
 
 - 粗、细两个 ResUNet **参数独立**。粗查询解码器为 4 层、32 个对象查询；细编码器含窗口和全局注意力，再进行 2 轮共享几何细化。
 - 形状先验是学习的 **auto-decoder**；PCA 只用于初始坐标参考系，不是形状基底。查询预测逐骨 `R/t/β64`，由先验 TSDF 与 CT 残差共同构成最终连续场。
@@ -19,7 +23,11 @@
 
 ![AnatoSKEL v1.0 architecture](figures/anatoskel-v1.0-architecture.png)
 
-[矢量 SVG](figures/anatoskel-v1.0-architecture.svg) · [高清 PNG](figures/anatoskel-v1.0-architecture.png) · [详细架构说明](v1.md)
+[英文 SVG](figures/anatoskel-v1.0-architecture.svg) · [英文 PNG](figures/anatoskel-v1.0-architecture.png) · [详细架构说明](v1.md)
+
+![AnatoSKEL v1.0 中文架构图](figures/anatoskel-v1.0-architecture-zh.png)
+
+[中文 SVG](figures/anatoskel-v1.0-architecture-zh.svg) · [中文 PNG](figures/anatoskel-v1.0-architecture-zh.png)
 
 - 全局 CT 与局部 tile **共用 Swin 编码器参数**，分别执行前向；Swin 四阶段各 2 个 block。结构化查询为 `64×3`，全局和局部各 3 层，使用物理坐标采样与 SwiGLU FFN。
 - 定位、身份、形状三种查询共同参与注意力；latent 预测使用三者均值经 LayerNorm 后的表示。定位查询负责中心和范围，身份查询负责分类。形状参考 anchor 固定为初始 proposal seed，后续中心更新不移动它。
@@ -32,12 +40,16 @@
 
 ## 编辑与重绘
 
-[绘图源文件](figures/draw_architectures.py)使用 Matplotlib，自动检查框中文字是否溢出，同时生成 SVG 和 PNG。SVG 将字体转为矢量路径以保持跨设备显示一致；修改文字或布局后可重新生成。PNG 分辨率分别为 `3600×2520`、`3600×3060`。
+[绘图源文件](figures/draw_architectures.py)使用 Matplotlib，自动检查框中文字是否溢出，生成中英文 SVG 和 PNG。[中文词条](figures/architecture_zh.json)单独维护，缺失译文时停止渲染。SVG 将字体转为矢量路径以保持跨设备显示一致；浏览或使用已生成的图无需安装字体。PNG 分辨率分别为 `3600×2520`、`3600×3060`。
 
 ```bash
 # 仅重绘文档图时需要；不是训练依赖。
 python -m pip install matplotlib==3.10.7
-python docs/figures/draw_architectures.py
+python docs/figures/draw_architectures.py --language all
+# 只重绘中文版，保留英文文件不动：
+python docs/figures/draw_architectures.py --language zh
 ```
 
-两张图作为新的文档提交保存在 `main`，不移动原有 `v0.1` / `v1.0` 标签，不修改模型代码或训练产物。
+重绘中文版时需已安装中文字体，如 Noto Sans CJK SC、思源黑体或 macOS 黑体；当前中文版使用 macOS 的 STHeiti，公式和拉丁字符使用 DejaVu Sans。
+
+中英文图作为文档提交保存在 `main`，不移动原有 `v0.1` / `v1.0` 标签，不修改模型代码或训练产物。

@@ -15,11 +15,11 @@
 
 按两个版本标签的实际代码绘制，包含层数、注意力头、FFN 激活函数、训练支路与 OBJ 导出流程。[图解与代码依据](docs/architecture_figures.md)。
 
-**v0.1：独立粗/细 ResUNet → 几何查询细化 → 隐式先验 + CT 残差场。** [SVG](docs/figures/anatoskel-v0.1-architecture.svg)
+**v0.1：独立粗/细 ResUNet → 几何查询细化 → 隐式先验 + CT 残差场。** [英文 SVG](docs/figures/anatoskel-v0.1-architecture.svg) · [中文版 PNG](docs/figures/anatoskel-v0.1-architecture-zh.png) · [中文 SVG](docs/figures/anatoskel-v0.1-architecture-zh.svg)
 
 ![AnatoSKEL v0.1 architecture](docs/figures/anatoskel-v0.1-architecture.png)
 
-**v1.0：共享 Swin → 结构化查询 → 残差潜空间扩散 → 多 tile 连续场融合。** [SVG](docs/figures/anatoskel-v1.0-architecture.svg)
+**v1.0：共享 Swin → 结构化查询 → 残差潜空间扩散 → 多 tile 连续场融合。** [英文 SVG](docs/figures/anatoskel-v1.0-architecture.svg) · [中文版 PNG](docs/figures/anatoskel-v1.0-architecture-zh.png) · [中文 SVG](docs/figures/anatoskel-v1.0-architecture-zh.svg)
 
 ![AnatoSKEL v1.0 architecture](docs/figures/anatoskel-v1.0-architecture.png)
 

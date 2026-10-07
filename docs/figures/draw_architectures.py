@@ -1,15 +1,18 @@
 """Render the architectures implemented at the immutable v0.1 / v1.0 tags.
 
 Documentation-only utility; requires matplotlib, separate from model dependencies.
-Run: python docs/figures/draw_architectures.py
+Run: python docs/figures/draw_architectures.py --language all
 """
 
+import argparse
+import json
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
@@ -27,17 +30,36 @@ PALETTE = {
 }
 
 
+def chinese_font_family():
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for name in ("Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+                 "STHeiti", "Heiti TC", "Arial Unicode MS", "PingFang HK"):
+        if name in available:
+            return ["DejaVu Sans", name]
+    raise RuntimeError("Chinese rendering requires a CJK font, e.g. Noto Sans CJK SC.")
+
+
 class Plate:
-    def __init__(self, height, title, subtitle):
+    def __init__(self, height, title, subtitle, language="en"):
         self.height = height
+        self.language = language
+        self.translations = (json.loads((OUT / "architecture_zh.json").read_text(encoding="utf-8"))
+                             if language == "zh" else {})
+        self.font_family = chinese_font_family() if language == "zh" else ["DejaVu Sans"]
         self.fig, self.ax = plt.subplots(figsize=(20, height))
         self.fig.subplots_adjust(0, 0, 1, 1)
         self.ax.set(xlim=(0, 20), ylim=(0, height), aspect="equal")
         self.ax.axis("off")
         self.fig.patch.set_facecolor("white")
-        self.ax.text(.45, height - .48, title, fontsize=24, fontweight="bold", color=INK)
-        self.ax.text(.45, height - .88, subtitle, fontsize=10.5, color=MUTED)
+        self.ax.text(.45, height - .48, self.translate(title), fontsize=24,
+                     fontweight="bold", color=INK, fontfamily=self.font_family)
+        self.ax.text(.45, height - .88, self.translate(subtitle), fontsize=10.5,
+                     color=MUTED, fontfamily=self.font_family)
         self.bounds = []
+
+    def translate(self, value):
+        # Require complete localization; formulas and identifiers are explicit entries too.
+        return self.translations[value] if self.language == "zh" and value else value
 
     def box(self, x, y, w, h, title, lines, kind="encoder", fs=10.4, gap=.26,
             dashed=False, title_fs=13):
@@ -48,16 +70,16 @@ class Plate:
             linestyle=(0, (5, 3)) if dashed else "solid", zorder=2,
         ))
         title_artist = self.ax.text(
-            x + .18, y + h - .23, title, va="top", fontsize=title_fs,
-            fontweight="bold", color=edge, zorder=3,
+            x + .18, y + h - .23, self.translate(title), va="top", fontsize=title_fs,
+            fontweight="bold", color=edge, zorder=3, fontfamily=self.font_family,
         )
         self.ax.plot([x + .16, x + w - .16], [y + h - .59] * 2,
                      color=edge, alpha=.25, linewidth=1, zorder=3)
         artists = [title_artist]
         for index, line in enumerate(lines):
             artists.append(self.ax.text(
-                x + .18, y + h - .77 - index * gap, line,
-                va="top", fontsize=fs, color=INK, zorder=3,
+                x + .18, y + h - .77 - index * gap, self.translate(line),
+                va="top", fontsize=fs, color=INK, zorder=3, fontfamily=self.font_family,
             ))
         self.bounds.append((title, (x, y, w, h), artists))
 
@@ -78,14 +100,17 @@ class Plate:
             if label_at is None:
                 a, b = points[0], points[-1]
                 label_at = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + .12)
-            self.ax.text(*label_at, label, ha="center", va="center",
-                         fontsize=8.8, color=color, zorder=4,
+            self.ax.text(*label_at, self.translate(label), ha="center", va="center",
+                         fontsize=8.8, color=color, zorder=4, fontfamily=self.font_family,
                          bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.8})
 
     def note(self, x, y, text, fs=10, color=MUTED, **kwargs):
-        self.ax.text(x, y, text, fontsize=fs, color=color, **kwargs)
+        self.ax.text(x, y, self.translate(text), fontsize=fs, color=color,
+                     fontfamily=self.font_family, **kwargs)
 
     def save(self, stem):
+        if self.language == "zh":
+            stem += "-zh"
         # Detect box text overflow before publishing any render.
         self.fig.canvas.draw()
         renderer = self.fig.canvas.get_renderer()
@@ -110,9 +135,10 @@ class Plate:
         plt.close(self.fig)
 
 
-def v01():
+def v01(language="en"):
     p = Plate(14, "AnatoSKEL v0.1 | CT-conditioned implicit bone reconstruction",
-              "Code tag v0.1 · 2d732ae · default model / first5090 configuration · solid: inference; dashed: training-only")
+              "Code tag v0.1 · 2d732ae · default model / first5090 configuration · solid: inference; dashed: training-only",
+              language=language)
     p.box(.45, 10.55, 2.2, 2.2, "CT input", [
         "[B, 1, D, H, W]", "Affine → RAS mm", "Acquisition support", "Full-FOV resampling",
         "Adaptive voxel budget",
@@ -231,9 +257,10 @@ def v01():
     p.save("anatoskel-v0.1-architecture")
 
 
-def v10():
+def v10(language="en"):
     p = Plate(17, "AnatoSKEL v1.0 | shared CT Transformer + residual latent diffusion",
-              "Code tag v1.0 · 90fe833 · v1_research / v1_autodl_4090 dimensions · solid: inference; dashed: training-only")
+              "Code tag v1.0 · 90fe833 · v1_research / v1_autodl_4090 dimensions · solid: inference; dashed: training-only",
+              language=language)
     p.box(.45, 13.25, 2.25, 2.45, "CT + support", [
         "CT + affine → RAS mm", "Acquisition-valid mask", "Soft-window [0, 1]",
         "Wide HU [−1, 1]", "Global longest side ≤128", "Pad to multiples of 32",
@@ -392,8 +419,12 @@ def v10():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--language", choices=("en", "zh", "all"), default="all")
+    args = parser.parse_args()
     plt.rcParams.update({"font.family": "DejaVu Sans", "svg.fonttype": "path",
                          "svg.hashsalt": "anatoskel-architectures"})
-    v01()
-    v10()
-    print("Rendered v0.1 and v1.0 architecture diagrams (SVG + PNG).")
+    for language in (("en", "zh") if args.language == "all" else (args.language,)):
+        v01(language)
+        v10(language)
+    print(f"Rendered v0.1 and v1.0 architecture diagrams: {args.language} (SVG + PNG).")
