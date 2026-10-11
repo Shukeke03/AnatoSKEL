@@ -17,6 +17,8 @@
 
 **v0.1：独立粗/细 ResUNet → 几何查询细化 → 隐式先验 + CT 残差场。** [英文 SVG](docs/figures/anatoskel-v0.1-architecture.svg) · [中文版 PNG](docs/figures/anatoskel-v0.1-architecture-zh.png) · [中文 SVG](docs/figures/anatoskel-v0.1-architecture-zh.svg)
 
+[ResUNet 与解码器细节图：残差连接、U-Net 跳连、自注意力位置及头数](docs/v01_resunet_detail.md)。
+
 ![AnatoSKEL v0.1 architecture](docs/figures/anatoskel-v0.1-architecture.png)
 
 **v1.0：共享 Swin → 结构化查询 → 残差潜空间扩散 → 多 tile 连续场融合。** [英文 SVG](docs/figures/anatoskel-v1.0-architecture.svg) · [中文版 PNG](docs/figures/anatoskel-v1.0-architecture-zh.png) · [中文 SVG](docs/figures/anatoskel-v1.0-architecture-zh.svg)

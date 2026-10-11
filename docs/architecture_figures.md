@@ -12,6 +12,8 @@
 
 [中文 SVG](figures/anatoskel-v0.1-architecture-zh.svg) · [中文 PNG](figures/anatoskel-v0.1-architecture-zh.png)
 
+[单独展开的 ResUNet 与解码器细节图](v01_resunet_detail.md)：显示卷积块和注意力块的残差相加位置、编码器到解码器的通道拼接，以及粗/细网络的注意力位置与头数。
+
 - 粗、细两个 ResUNet **参数独立**。粗查询解码器为 4 层、32 个对象查询；细编码器含窗口和全局注意力，再进行 2 轮共享几何细化。
 - 形状先验是学习的 **auto-decoder**；PCA 只用于初始坐标参考系，不是形状基底。查询预测逐骨 `R/t/β64`，由先验 TSDF 与 CT 残差共同构成最终连续场。
 - 基础 ROI 为 `128³ @ 1 mm`。触边重试增大采样间距扩大范围，最多 3 次；此版本没有 v1.0 的同分辨率多 tile 融合。
